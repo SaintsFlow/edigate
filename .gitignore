@@ -1,0 +1,15 @@
+bin/
+.env
+*.test
+coverage.*
+.DS_Store
+__pycache__/
+.venv/
+
+# working files of the author
+AGENTS.md
+CLAUDE.md
+.claude/
+_handoff/
+.cursor/
+.codex/
