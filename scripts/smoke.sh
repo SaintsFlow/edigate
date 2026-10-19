@@ -3,9 +3,12 @@
 # Creates a tenant with an interchange id, an agent, an operator and a partner,
 # then checks: an agent gets an empty inbox; bad requests get the right errors;
 # the audit log has the calls; a partner can send an 850 and gets an MDN; the
-# agent reads that document without the partner's free text; the same
+# agent reads that document without the partner's free text (it is listed as
+# notes); the agent extracts a closed value from a note through the quarantined
+# reader (a local model, skipped when Ollama is not reachable); the same
 # interchange again gives the same MDN and no new rows; the same ISA13 with
-# another body gives 409; a foreign AS2-From gives 403.
+# another body gives 409; a foreign AS2-From gives 403; the gateway log holds
+# none of the partner's text.
 # Exits 0 only if every check matches. Safe to run again: principal ids carry a
 # random suffix, ISA13 comes from the clock, and the EDI rows of the tenant
 # "smoke" (stand data only) are cleared at the start so that step a still sees
@@ -57,14 +60,15 @@ post() {
 }
 
 # edi850 <file> <ISA13> <order number>: writes an 850 of the smoke partner. The
-# PID05 text is what the agent must never see.
+# PID05, MSG01 and N1-02 texts are what the agent must never see.
 PID_TEXT="SMOKE SECRET WIDGET TEXT"
+MSG_TEXT="Please call before delivery."
 edi850() {
 	{
 		printf 'ISA*00*          *00*          *ZZ*ZZTESTBUYER    *ZZ*ZZTESTSUPPL    *261018*1200*U*00401*%s*0*T*>~' "$2"
 		printf 'GS*PO*ZZTESTBUYER*ZZTESTSUPPL*20261018*1200*1*X*004010~ST*850*0001~BEG*00*SA*%s**20261018~' "$3"
 		printf 'N1*BY*TEST BUYER*92*B001~N1*ST*TEST SHIP-TO*92*DC01~PO1*1*10*EA*5.25**UP*012345678905~'
-		printf 'PID*F****%s~CTT*1~SE*8*0001~GE*1*1~IEA*1*%s~' "$PID_TEXT" "$2"
+		printf 'PID*F****%s~MSG*%s~CTT*1~SE*9*0001~GE*1*1~IEA*1*%s~' "$PID_TEXT" "$MSG_TEXT" "$2"
 	} >"$1"
 }
 
@@ -75,7 +79,8 @@ send() {
 
 CALL_BODY='{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"edi.list_inbox","arguments":{}}}'
 
-sql "DELETE FROM edi_documents WHERE tenant_id = 'smoke'" "DELETE FROM edi_interchanges WHERE tenant_id = 'smoke'" \
+sql "DELETE FROM quarantine_calls WHERE tenant_id = 'smoke'" "DELETE FROM edi_notes WHERE tenant_id = 'smoke'" \
+	"DELETE FROM edi_documents WHERE tenant_id = 'smoke'" "DELETE FROM edi_interchanges WHERE tenant_id = 'smoke'" \
 	"DELETE FROM edi_rejected WHERE tenant_id = 'smoke'" >/dev/null
 
 "$BIN/edigatectl" tenant add smoke "Smoke tenant" --interchange-id "$GATEWAY" >/dev/null
@@ -139,6 +144,36 @@ case "$doc$out" in
 *WIDGET*) fail "h: part of the PID05 text reached the agent" ;;
 esac
 
+# (m) the free text is listed as notes (reference and place, no text); the texts
+# of PID05, MSG01 and N1-02 are not in the answer
+expect "m notes" "$doc" '"notes":[{"reason":"free_text","ref":"$note_'
+expect "m note place" "$doc" '"segment_path":"PO1[1]/MSG01"'
+case "$doc$out" in
+*"$MSG_TEXT"* | *"call before delivery"* | *"TEST BUYER"* | *"TEST SHIP-TO"*) fail "m: a free text reached the agent: $doc" ;;
+*) echo "ok: m no PID05, MSG01 or N1-02 text" ;;
+esac
+
+# (n) the agent extracts a closed value from the MSG01 note through the
+# quarantined reader; skipped when Ollama is not reachable
+NOTE_REF=$(printf '%s' "$doc" | sed -n 's/.*"ref":"\([^"]*\)","segment_path":"PO1\[1\]\/MSG01".*/\1/p')
+[ -n "$NOTE_REF" ] || fail "n: no reference of the MSG01 note in: $doc"
+if curl -s -m 3 http://127.0.0.1:11434/api/tags >/dev/null 2>&1; then
+	rc=0
+	ext=$("$BIN/edigatectl" call --url "$URL" --token "$AGENT_TOKEN" edi.extract_note \
+		"{\"document_id\":\"$DOC_ID\",\"ref\":\"$NOTE_REF\",\"schema_id\":\"delivery_instruction\"}") || rc=$?
+	[ "$rc" = 0 ] || fail "n: edi.extract_note exited with $rc: $ext"
+	expect "n declassified" "$ext" '"declassified":true'
+	expect "n schema" "$ext" '"schema_id":"delivery_instruction"'
+	case "$ext" in
+	*"$MSG_TEXT"*) fail "n: the note text came back: $ext" ;;
+	esac
+	n=$(sql "SELECT count(*) FROM quarantine_calls WHERE tenant_id = 'smoke' AND outcome = 'ok' AND prompt_tokens > 0")
+	[ "$n" = 1 ] || fail "n: expected one cost record with tokens, got $n"
+	echo "ok: n cost record"
+else
+	echo "skip: n (ollama not reachable)"
+fi
+
 # (i) the same interchange again: 200, the same MDN byte for byte, one row
 sleep 1
 again=$(send "$TMP/first.edi") || fail "i: send failed: $again"
@@ -165,5 +200,12 @@ out=$(send "$TMP/first.edi" ZZ:ZZTESTOTHER) || rc=$?
 [ "$rc" = 1 ] || fail "k: expected exit code 1, got $rc"
 expect "k HTTP 403" "$out" "HTTP 403"
 expect "k forbidden" "$out" '"reason":"forbidden"'
+
+# (o) the gateway log holds none of the partner's text
+logs=$($COMPOSE logs --no-color edigate)
+case "$logs" in
+*"$PID_TEXT"* | *"$MSG_TEXT"* | *"call before delivery"* | *"TEST BUYER"* | *"TEST SHIP-TO"*) fail "o: partner text in the gateway log" ;;
+*) echo "ok: o no partner text in the log" ;;
+esac
 
 echo "smoke ok"

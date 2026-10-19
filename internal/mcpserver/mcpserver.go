@@ -2,8 +2,9 @@
 //
 // Input: tools/call requests that passed the edge (the caller's identity is in
 // RequestExtra.TokenInfo). Output: a structured result, or a *jsonrpc.Error in
-// the single error format. One wrapper serves every tool: check the input
-// schema, call the service, write one audit_log row, answer.
+// the single error format. One wrapper serves every tool: the bucket of the
+// tool (if it has one), the input schema, the taint check for tools with an
+// effect, the service, the output schema, and one audit_log row.
 package mcpserver
 
 import (
@@ -11,53 +12,100 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"log/slog"
+	"sync"
 
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"golang.org/x/time/rate"
 
 	"github.com/SaintsFlow/edigate/internal/contracts"
 	"github.com/SaintsFlow/edigate/internal/edge"
+	"github.com/SaintsFlow/edigate/internal/quarantine"
 	"github.com/SaintsFlow/edigate/internal/rpcerr"
 	"github.com/SaintsFlow/edigate/internal/store"
+	"github.com/SaintsFlow/edigate/internal/taint"
 	"github.com/SaintsFlow/edigate/internal/tools"
 )
 
 const (
 	listInbox    = "edi.list_inbox"
 	readDocument = "edi.read_document"
+	extractNote  = "edi.extract_note"
 )
 
-type server struct {
-	store *store.Store
-	log   *slog.Logger
+// toolRates are the own buckets of tools, per principal, on top of the general
+// bucket of the edge. A model call is slow and costs money, so edi.extract_note
+// gets 2 calls per second with a burst of 2.
+var toolRates = map[string]struct {
+	rate  rate.Limit
+	burst int
+}{
+	extractNote: {2, 2},
 }
 
-// service runs a tool for a tenant on arguments that already passed the schema.
-// It returns a value to encode, or an error (rpcerr errors pass through,
-// any other error becomes "internal").
-type service func(ctx context.Context, tenantID string, args json.RawMessage) (any, error)
+type server struct {
+	store  *store.Store
+	reader quarantine.QuarantinedReader // nil: edi.extract_note answers quarantine_invalid
+	log    *slog.Logger
 
-// New builds the MCP server with all tools registered.
-func New(st *store.Store, log *slog.Logger) *mcp.Server {
-	s := &server{store: st, log: log}
+	// Schema checks; tests replace them to register tools that have no schema file yet.
+	validateIn  func(tool string, args []byte) error
+	validateOut func(tool string, body []byte) error
+
+	// One limiter per tool and principal. Principals are few, so keys are not swept.
+	limitMu  sync.Mutex
+	limiters map[string]*rate.Limiter
+}
+
+// service runs a tool for the caller on arguments that already passed the
+// schema. It returns a value to encode, or an error (rpcerr errors pass
+// through, any other error becomes "internal"). The identity comes from the
+// edge, never from the arguments.
+type service func(ctx context.Context, id edge.Identity, args json.RawMessage) (any, error)
+
+func newServer(st *store.Store, reader quarantine.QuarantinedReader, log *slog.Logger) *server {
+	return &server{
+		store: st, reader: reader, log: log, limiters: map[string]*rate.Limiter{},
+		validateIn: contracts.Validate, validateOut: contracts.ValidateOutput,
+	}
+}
+
+// New builds the MCP server with all tools registered. reader is the
+// quarantined reader behind edi.extract_note; nil switches that tool off.
+func New(st *store.Store, reader quarantine.QuarantinedReader, log *slog.Logger) *mcp.Server {
+	s := newServer(st, reader, log)
 	srv := mcp.NewServer(&mcp.Implementation{Name: "edigate", Version: "0.1.0-dev"}, nil)
 	s.add(srv, listInbox, "List the documents in the tenant's inbox.",
-		func(ctx context.Context, tenantID string, args json.RawMessage) (any, error) {
+		func(ctx context.Context, id edge.Identity, args json.RawMessage) (any, error) {
 			var in tools.ListInboxInput
 			if len(args) > 0 {
 				if err := json.Unmarshal(args, &in); err != nil {
 					return nil, rpcerr.New(rpcerr.SchemaInvalid, "")
 				}
 			}
-			return tools.ListInbox(ctx, st, tenantID, in)
+			return tools.ListInbox(ctx, st, id.TenantID, in)
 		})
-	s.add(srv, readDocument, "Read one inbox document: typed header and lines, no free text.",
-		func(ctx context.Context, tenantID string, args json.RawMessage) (any, error) {
+	s.add(srv, readDocument, "Read one inbox document: typed header, lines and references. "+
+		"The free text of the partner is not shown. It is kept in notes: the answer lists each note "+
+		"with a reference like $note_1, its place in the document and why it is a note.",
+		func(ctx context.Context, id edge.Identity, args json.RawMessage) (any, error) {
 			var in tools.ReadDocumentInput
 			if err := json.Unmarshal(args, &in); err != nil {
 				return nil, rpcerr.New(rpcerr.SchemaInvalid, "")
 			}
-			return tools.ReadDocument(ctx, st, tenantID, in)
+			return tools.ReadDocument(ctx, st, id.TenantID, in)
+		})
+	s.add(srv, extractNote, "Read one note of a document as a fixed set of values. Pass the document id, "+
+		"the note reference and a schema: delivery_instruction (a delivery instruction from a fixed list), "+
+		"packaging (a packaging kind from a fixed list and a pallet height in cm) or contact_request "+
+		"(whether the partner asks for contact and by which channel). The answer holds only the values of "+
+		"that schema, never the text of the note.",
+		func(ctx context.Context, id edge.Identity, args json.RawMessage) (any, error) {
+			var in tools.ExtractNoteInput
+			if err := json.Unmarshal(args, &in); err != nil {
+				return nil, rpcerr.New(rpcerr.SchemaInvalid, "")
+			}
+			return tools.ExtractNote(ctx, st, s.reader, id.TenantID, id.TraceID, in)
 		})
 	return srv
 }
@@ -94,7 +142,7 @@ func (s *server) call(ctx context.Context, tool string, svc service, req *mcp.Ca
 	args := req.Params.Arguments
 	sum := sha256.Sum256(args)
 
-	result, callErr := s.run(ctx, tool, svc, id.TenantID, args)
+	result, callErr := s.run(ctx, tool, svc, id, args)
 	outcome := "ok"
 	var wireErr *jsonrpc.Error
 	if callErr != nil {
@@ -118,12 +166,37 @@ func (s *server) call(ctx context.Context, tool string, svc service, req *mcp.Ca
 	return result, nil // result is set whenever callErr is nil
 }
 
-// run checks the input, calls the service and builds the result.
-func (s *server) run(ctx context.Context, tool string, svc service, tenantID string, args json.RawMessage) (*mcp.CallToolResult, error) {
-	if err := contracts.Validate(tool, args); err != nil {
+// allow takes a token from the tool's own bucket for this principal. Tools
+// without an own bucket always pass.
+func (s *server) allow(tool, principal string) bool {
+	cfg, ok := toolRates[tool]
+	if !ok {
+		return true
+	}
+	s.limitMu.Lock()
+	defer s.limitMu.Unlock()
+	key := tool + "|" + principal
+	lim, found := s.limiters[key]
+	if !found {
+		lim = rate.NewLimiter(cfg.rate, cfg.burst)
+		s.limiters[key] = lim
+	}
+	return lim.Allow()
+}
+
+// run checks the bucket and the input, refuses a note reference on its way to a
+// tool with an effect, calls the service and builds the result.
+func (s *server) run(ctx context.Context, tool string, svc service, id edge.Identity, args json.RawMessage) (*mcp.CallToolResult, error) {
+	if !s.allow(tool, id.PrincipalID) {
+		return nil, rpcerr.New(rpcerr.RateLimited, "")
+	}
+	if err := s.validateIn(tool, args); err != nil {
 		return nil, rpcerr.New(rpcerr.SchemaInvalid, "arguments do not match the tool schema")
 	}
-	out, err := svc(ctx, tenantID, args)
+	if err := taint.CheckSink(tool, args); err != nil {
+		return nil, err
+	}
+	out, err := svc(ctx, id, args)
 	if err != nil {
 		if _, reason := rpcerr.From(err); reason == rpcerr.Internal {
 			s.log.Error("tool failed", "tool", tool, "error", err.Error())
@@ -131,7 +204,7 @@ func (s *server) run(ctx context.Context, tool string, svc service, tenantID str
 		return nil, err
 	}
 	body, err := json.Marshal(out)
-	if err != nil || contracts.ValidateOutput(tool, body) != nil {
+	if err != nil || s.validateOut(tool, body) != nil {
 		s.log.Error("tool result does not match its output schema", "tool", tool)
 		return nil, rpcerr.New(rpcerr.Internal, "internal error")
 	}

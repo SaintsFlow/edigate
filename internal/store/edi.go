@@ -58,6 +58,18 @@ type InboundDocument struct {
 	Body        []byte // JSON; nil is stored as NULL
 	Status      string // received or rejected
 	Errors      []byte // JSON array; nil is stored as NULL
+	Notes       []InboundNote
+}
+
+// InboundNote is a piece of partner text kept out of the body, stored with the
+// document it came from.
+type InboundNote struct {
+	Ref         string
+	SegmentPath string
+	Reason      string // free_text or format
+	Body        string
+	TaintLabel  string
+	Canary      string
 }
 
 // InboundInterchange is a parsed interchange from a partner, ready to store.
@@ -133,13 +145,24 @@ func (s *Store) SaveInbound(ctx context.Context, in InboundInterchange) (SaveRes
 	}
 
 	for _, d := range in.Documents {
-		_, err = tx.Exec(ctx,
+		var docID string
+		err = tx.QueryRow(ctx,
 			`INSERT INTO edi_documents
 			   (interchange_id, tenant_id, partner_id, gs06, st01, st02, business_ref, body, status, errors)
-			 VALUES ($1::uuid, $2, $3, $4, $5, $6, NULLIF($7, ''), $8, $9, $10)`,
-			id, in.TenantID, in.PartnerID, d.GS06, d.ST01, d.ST02, d.BusinessRef, d.Body, d.Status, d.Errors)
+			 VALUES ($1::uuid, $2, $3, $4, $5, $6, NULLIF($7, ''), $8, $9, $10)
+			 RETURNING id::text`,
+			id, in.TenantID, in.PartnerID, d.GS06, d.ST01, d.ST02, d.BusinessRef, d.Body, d.Status, d.Errors).Scan(&docID)
 		if err != nil {
 			return SaveResult{}, fmt.Errorf("store document: %w", err)
+		}
+		for _, n := range d.Notes {
+			_, err = tx.Exec(ctx,
+				`INSERT INTO edi_notes (document_id, tenant_id, ref, segment_path, reason, body, taint_label, canary)
+				 VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8)`,
+				docID, in.TenantID, n.Ref, n.SegmentPath, n.Reason, n.Body, n.TaintLabel, n.Canary)
+			if err != nil {
+				return SaveResult{}, fmt.Errorf("store note: %w", err)
+			}
 		}
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -219,4 +242,84 @@ func (s *Store) ReadDocument(ctx context.Context, tenantID, id string) (Document
 		return Document{}, ErrNotFound
 	}
 	return d, err
+}
+
+// NoteRef is what the agent may know about a note: where it is and why it is a
+// note. The text stays in the table.
+type NoteRef struct {
+	Ref         string
+	SegmentPath string
+	Reason      string
+}
+
+// ListNotes returns the notes of a document of the tenant in document order.
+// The caller has already read the document, so an unknown id gives an empty list.
+func (s *Store) ListNotes(ctx context.Context, tenantID, documentID string) ([]NoteRef, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT n.ref, n.segment_path, n.reason
+		 FROM edi_notes n
+		 WHERE n.tenant_id = $1 AND n.document_id = $2::uuid
+		 ORDER BY substring(n.ref from 7)::int`, tenantID, documentID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	notes := []NoteRef{}
+	for rows.Next() {
+		var n NoteRef
+		if err := rows.Scan(&n.Ref, &n.SegmentPath, &n.Reason); err != nil {
+			return nil, err
+		}
+		notes = append(notes, n)
+	}
+	return notes, rows.Err()
+}
+
+// StoredNote is a note with its text, for the quarantined reader only.
+type StoredNote struct {
+	Body       string
+	TaintLabel string
+	Canary     string
+}
+
+// ReadNote returns a note of a visible document (850 or 810, accepted) of the
+// tenant. Another tenant, a 997, a rejected set, an unknown document and an
+// unknown ref all give ErrNotFound.
+func (s *Store) ReadNote(ctx context.Context, tenantID, documentID, ref string) (StoredNote, error) {
+	var n StoredNote
+	err := s.pool.QueryRow(ctx,
+		`SELECT n.body, n.taint_label, n.canary
+		 FROM edi_notes n JOIN edi_documents d ON d.id = n.document_id
+		 WHERE n.tenant_id = $1 AND d.tenant_id = $1 AND n.document_id = $2::uuid AND n.ref = $3
+		   AND d.`+agentVisible, tenantID, documentID, ref).
+		Scan(&n.Body, &n.TaintLabel, &n.Canary)
+	if isNoRows(err) {
+		return StoredNote{}, ErrNotFound
+	}
+	return n, err
+}
+
+// QuarantineCall is the cost record of one call to the model (protocol item O1).
+// The note text and the answer are not part of it.
+type QuarantineCall struct {
+	TenantID         string
+	TraceID          string
+	DocumentID       string
+	Ref              string
+	SchemaID         string
+	Model            string
+	PromptTokens     *int // nil when the model reported none
+	CompletionTokens *int
+	LatencyMS        int
+	Outcome          string
+}
+
+// RecordQuarantineCall stores the cost record of a call.
+func (s *Store) RecordQuarantineCall(ctx context.Context, c QuarantineCall) error {
+	_, err := s.pool.Exec(ctx,
+		`INSERT INTO quarantine_calls
+		   (tenant_id, trace_id, document_id, ref, schema_id, model, prompt_tokens, completion_tokens, latency_ms, outcome)
+		 VALUES ($1, $2, $3::uuid, $4, $5, $6, $7, $8, $9, $10)`,
+		c.TenantID, c.TraceID, c.DocumentID, c.Ref, c.SchemaID, c.Model, c.PromptTokens, c.CompletionTokens, c.LatencyMS, c.Outcome)
+	return err
 }

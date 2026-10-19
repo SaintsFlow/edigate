@@ -25,6 +25,7 @@ import (
 	"github.com/SaintsFlow/edigate/internal/edge"
 	"github.com/SaintsFlow/edigate/internal/inbound"
 	"github.com/SaintsFlow/edigate/internal/mcpserver"
+	"github.com/SaintsFlow/edigate/internal/quarantine"
 	"github.com/SaintsFlow/edigate/internal/store"
 )
 
@@ -59,7 +60,8 @@ func run() error {
 		return err
 	}
 
-	mcpServer := mcpserver.New(st, log)
+	reader := quarantine.NewReader(quarantine.NewHTTPCompleter(cfg.QuarantineBaseURL, cfg.QuarantineAPIKey), cfg.QuarantineModel, st)
+	mcpServer := mcpserver.New(st, reader, log)
 	sdk := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return mcpServer },
 		&mcp.StreamableHTTPOptions{Stateless: true, JSONResponse: true})
 

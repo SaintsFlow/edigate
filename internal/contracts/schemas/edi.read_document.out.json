@@ -3,6 +3,20 @@
   "type": "object",
   "additionalProperties": false,
   "required": ["id", "st01", "status", "header", "lines", "notes"],
+  "$defs": {
+    "references": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["qualifier", "id"],
+        "properties": {
+          "qualifier": { "type": "string" },
+          "id": { "type": ["string", "null"] }
+        }
+      }
+    }
+  },
   "properties": {
     "id": { "type": "string" },
     "st01": { "enum": ["850", "810"] },
@@ -12,7 +26,7 @@
         {
           "type": "object",
           "additionalProperties": false,
-          "required": ["partner_id", "business_ref", "purpose", "order_type", "order_date", "currency", "ship_to", "buyer"],
+          "required": ["partner_id", "business_ref", "purpose", "order_type", "order_date", "currency", "ship_to", "buyer", "references"],
           "properties": {
             "partner_id": { "type": "string" },
             "business_ref": { "type": "string" },
@@ -21,20 +35,24 @@
             "order_date": { "type": "string" },
             "currency": { "type": ["string", "null"] },
             "ship_to": { "type": ["string", "null"] },
-            "buyer": { "type": ["string", "null"] }
+            "buyer": { "type": ["string", "null"] },
+            "references": { "$ref": "#/$defs/references" }
           }
         },
         {
           "type": "object",
           "additionalProperties": false,
-          "required": ["partner_id", "business_ref", "invoice_date", "order_ref", "currency", "total_amount"],
+          "required": ["partner_id", "business_ref", "invoice_date", "order_ref", "currency", "total_amount", "ship_to", "buyer", "references"],
           "properties": {
             "partner_id": { "type": "string" },
             "business_ref": { "type": "string" },
             "invoice_date": { "type": "string" },
             "order_ref": { "type": ["string", "null"] },
             "currency": { "type": ["string", "null"] },
-            "total_amount": { "type": "number" }
+            "total_amount": { "type": "number" },
+            "ship_to": { "type": ["string", "null"] },
+            "buyer": { "type": ["string", "null"] },
+            "references": { "$ref": "#/$defs/references" }
           }
         }
       ]
@@ -60,10 +78,11 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["ref", "segment_path"],
+        "required": ["ref", "segment_path", "reason"],
         "properties": {
           "ref": { "type": "string" },
-          "segment_path": { "type": "string" }
+          "segment_path": { "type": "string" },
+          "reason": { "enum": ["free_text", "format"] }
         }
       }
     }

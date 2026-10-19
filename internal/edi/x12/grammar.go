@@ -7,9 +7,12 @@ import "fmt"
 // /810 and /997 (checked 19.10.2026). The subset is smaller than the standard:
 // a segment that is not listed here is rejected as "not in the defined set".
 //
-// 850: ADV and its MTX are not supported, and neither are the many segments the
-// standard allows in the heading and the PO1 loop (SAC, ITD, TD5, LIN, ...).
-// 810: DMG, YNQ, ITD and others are not supported.
+// 850: the many segments the standard allows in the heading and the PO1 loop
+// (SAC, ITD, TD5, LIN, ...) are not supported. The ADV loop (ADV, DTM, MTX) of
+// the heading is supported because MTX02 and MTX03 carry free text; its
+// repeat count is ">1" in the standard and is capped at 1000 here.
+// 810: DMG, YNQ (it stands before PER in the heading), ITD and others are not
+// supported.
 //
 // Inside the PO1 loop of the 850 the standard puts REF before MSG, and the
 // grammar follows the standard (the wave task listed MSG first).
@@ -39,6 +42,7 @@ var grammars = map[string][]node{
 		seg("BEG", 1, 1), seg("CUR", 0, 1), seg("REF", 0, 12), seg("PER", 0, 3), seg("DTM", 0, 10),
 		loop("N9", 0, 1000, seg("MSG", 0, 1000)),
 		n1Loop(),
+		loop("ADV", 0, 1000, seg("DTM", 0, 1000), seg("MTX", 0, 1000)),
 		loop("PO1", 1, 100000,
 			seg("CUR", 0, 1),
 			loop("PID", 0, 1000),
@@ -47,7 +51,7 @@ var grammars = map[string][]node{
 		seg("CTT", 1, 1),
 	},
 	"810": {
-		seg("BIG", 1, 1), seg("NTE", 0, 100), seg("CUR", 0, 1), seg("REF", 0, 12),
+		seg("BIG", 1, 1), seg("NTE", 0, 100), seg("CUR", 0, 1), seg("REF", 0, 12), seg("PER", 0, 3),
 		n1Loop(),
 		seg("DTM", 0, 10),
 		loop("IT1", 1, 200000,

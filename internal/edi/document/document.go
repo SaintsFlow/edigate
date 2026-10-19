@@ -1,15 +1,15 @@
-// Package document turns an accepted X12 set into the typed body stored in
-// edi_documents.body and reads it back for the agent.
+// Package document holds the types of the stored document body and reads it back
+// for the agent.
 //
-// Input: an x12.Set that Parse accepted (Build) or the stored JSON (Decode).
-// Output: header and lines made of typed fields only. Free text never enters the
-// body: PID05, MSG01, REF03, N1-02, N2, PER and NTE02 are not read here at all
-// (wave 2-3 moves them into notes). Money and quantities are decimal strings
-// written as JSON numbers (json.Number), never float64.
+// Input: the stored JSON (Decode) or an x12.Set of a 997 (BuildAck). Output: the
+// typed header and lines of an 850 or 810, or the body of a 997. Money and
+// quantities are decimal strings written as JSON numbers (json.Number), never
+// float64.
 //
-// Strings that a partner wrote and the agent will see (the order number, the
-// SKU, the N1 code) are copied as they are for now: their formats and the note
-// fallback come with the sanitizer in wave 2-3.
+// The body of an 850 or 810 is not made here: internal/sanitize builds it
+// through the white list of elements and their formats, and puts every free
+// text into notes. This package only gives that code the types and the number
+// helpers (Decimal, ImpliedDecimal, ISODate).
 package document
 
 import (
@@ -20,16 +20,25 @@ import (
 	"github.com/SaintsFlow/edigate/internal/edi/x12"
 )
 
+// Reference is one REF of the heading: qualifier REF01 and identification
+// REF02 (null when the partner left it out). A value that failed its format is
+// a note reference ("$note_N") in place of the text.
+type Reference struct {
+	Qualifier string  `json:"qualifier"`
+	ID        *string `json:"id"`
+}
+
 // Header850 is the header of a purchase order.
 type Header850 struct {
-	PartnerID   string  `json:"partner_id"`
-	BusinessRef string  `json:"business_ref"` // BEG03
-	Purpose     string  `json:"purpose"`      // BEG01
-	OrderType   string  `json:"order_type"`   // BEG02
-	OrderDate   string  `json:"order_date"`   // BEG05, YYYY-MM-DD
-	Currency    *string `json:"currency"`     // CUR02
-	ShipTo      *string `json:"ship_to"`      // N1-04 of the N1 loop with N1-01 = ST
-	Buyer       *string `json:"buyer"`        // N1-04 of the N1 loop with N1-01 = BY
+	PartnerID   string      `json:"partner_id"`
+	BusinessRef string      `json:"business_ref"` // BEG03
+	Purpose     string      `json:"purpose"`      // BEG01
+	OrderType   string      `json:"order_type"`   // BEG02
+	OrderDate   string      `json:"order_date"`   // BEG05, YYYY-MM-DD
+	Currency    *string     `json:"currency"`     // CUR02
+	ShipTo      *string     `json:"ship_to"`      // N1-04 of the N1 loop with N1-01 = ST
+	Buyer       *string     `json:"buyer"`        // N1-04 of the N1 loop with N1-01 = BY
+	References  []Reference `json:"references"`   // REF01 and REF02 of the heading
 }
 
 // Header810 is the header of an invoice.
@@ -40,6 +49,9 @@ type Header810 struct {
 	OrderRef    *string     `json:"order_ref"`    // BIG04
 	Currency    *string     `json:"currency"`     // CUR02
 	TotalAmount json.Number `json:"total_amount"` // TDS01 with two implied decimals
+	ShipTo      *string     `json:"ship_to"`      // N1-04 of the N1 loop with N1-01 = ST
+	Buyer       *string     `json:"buyer"`        // N1-04 of the N1 loop with N1-01 = BY
+	References  []Reference `json:"references"`   // REF01 and REF02 of the heading
 }
 
 // Line is one PO1 or IT1 loop. Every value is optional in the standard.
@@ -50,6 +62,18 @@ type Line struct {
 	UnitPrice    *json.Number `json:"unit_price"`
 	SKU          *string      `json:"sku"`
 	SKUQualifier *string      `json:"sku_qualifier"`
+}
+
+// Body850 is the stored body of an 850.
+type Body850 struct {
+	Header Header850 `json:"header"`
+	Lines  []Line    `json:"lines"`
+}
+
+// Body810 is the stored body of an 810.
+type Body810 struct {
+	Header Header810 `json:"header"`
+	Lines  []Line    `json:"lines"`
 }
 
 // Ack is the body of a 997. The gateway reads it (wave 2-7); the agent never sees it.
@@ -71,115 +95,9 @@ type AckSet struct {
 	Errors  []string `json:"errors"`  // AK502..AK506
 }
 
-type body850 struct {
-	Header Header850 `json:"header"`
-	Lines  []Line    `json:"lines"`
-}
-
-type body810 struct {
-	Header Header810 `json:"header"`
-	Lines  []Line    `json:"lines"`
-}
-
-// Built is what Build returns: the business reference and the JSON body.
-type Built struct {
-	BusinessRef string // BEG03 for an 850, BIG02 for an 810, "" for a 997
-	Body        []byte
-}
-
-// Build makes the typed body of an accepted set. partnerID is the sender
-// (ISA05:ISA06). It fails for a set type it does not know.
-func Build(set *x12.Set, partnerID string) (Built, error) {
-	switch st01 := set.ST.Value(1); st01 {
-	case "850":
-		h, lines := build850(set, partnerID)
-		return marshal(h.BusinessRef, body850{Header: h, Lines: lines})
-	case "810":
-		h, lines := build810(set, partnerID)
-		return marshal(h.BusinessRef, body810{Header: h, Lines: lines})
-	case "997":
-		return marshal("", build997(set))
-	default:
-		return Built{}, fmt.Errorf("no body for transaction set %q", x12.Printable(st01))
-	}
-}
-
-func marshal(ref string, v any) (Built, error) {
-	b, err := json.Marshal(v)
-	if err != nil {
-		return Built{}, err
-	}
-	return Built{BusinessRef: ref, Body: b}, nil
-}
-
-func build850(set *x12.Set, partnerID string) (Header850, []Line) {
-	h := Header850{PartnerID: partnerID}
-	var lines []Line
-	for i := range set.Segments {
-		s := &set.Segments[i]
-		switch {
-		case s.Path == "BEG":
-			h.Purpose, h.OrderType, h.BusinessRef = s.Value(1), s.Value(2), s.Value(3)
-			h.OrderDate = isoDate(s.Value(5))
-		case s.Path == "CUR":
-			h.Currency = optional(s.Value(2))
-		case s.ID == "N1": // only the heading has N1 loops in the supported 850
-			switch party := optional(s.Value(4)); s.Value(1) {
-			case "ST":
-				if h.ShipTo == nil {
-					h.ShipTo = party
-				}
-			case "BY":
-				if h.Buyer == nil {
-					h.Buyer = party
-				}
-			}
-		case s.ID == "PO1":
-			lines = append(lines, line(s))
-		}
-	}
-	return h, noNil(lines)
-}
-
-func build810(set *x12.Set, partnerID string) (Header810, []Line) {
-	h := Header810{PartnerID: partnerID, TotalAmount: "0.00"}
-	var lines []Line
-	for i := range set.Segments {
-		s := &set.Segments[i]
-		switch {
-		case s.Path == "BIG":
-			h.InvoiceDate, h.BusinessRef, h.OrderRef = isoDate(s.Value(1)), s.Value(2), optional(s.Value(4))
-		case s.Path == "CUR":
-			h.Currency = optional(s.Value(2))
-		case s.Path == "TDS":
-			h.TotalAmount = json.Number(impliedDecimal(s.Value(1), 2))
-		case s.ID == "IT1":
-			lines = append(lines, line(s))
-		}
-	}
-	return h, noNil(lines)
-}
-
-// line reads one PO1 or IT1 segment, which share their layout: element 1 line
-// number, 2 quantity, 3 unit, 4 unit price, then pairs of product ID qualifier
-// and product ID from element 6 on. The first complete pair gives the SKU.
-func line(s *x12.Segment) Line {
-	l := Line{
-		LineNo:    optional(s.Value(1)),
-		Qty:       optionalNumber(s.Value(2)),
-		Unit:      optional(s.Value(3)),
-		UnitPrice: optionalNumber(s.Value(4)),
-	}
-	for n := 6; n < 25; n += 2 {
-		if q, id := s.Value(n), s.Value(n+1); q != "" && id != "" {
-			l.SKUQualifier, l.SKU = &q, &id
-			break
-		}
-	}
-	return l
-}
-
-func build997(set *x12.Set) Ack {
+// BuildAck makes the JSON body of an accepted 997. It holds codes and counters
+// only.
+func BuildAck(set *x12.Set) ([]byte, error) {
 	a := Ack{Sets: []AckSet{}}
 	for i := range set.Segments {
 		s := &set.Segments[i]
@@ -203,7 +121,7 @@ func build997(set *x12.Set) Ack {
 			a.GroupAck, a.Included, a.Received, a.Accepted = s.Value(1), s.Value(2), s.Value(3), s.Value(4)
 		}
 	}
-	return a
+	return json.Marshal(a)
 }
 
 // Decode reads a stored body of an 850 or 810 back into typed values. Fields
@@ -211,16 +129,18 @@ func build997(set *x12.Set) Ack {
 func Decode(st01 string, raw []byte) (header any, lines []Line, err error) {
 	switch st01 {
 	case "850":
-		var b body850
+		var b Body850
 		if err := json.Unmarshal(raw, &b); err != nil {
 			return nil, nil, err
 		}
+		b.Header.References = noNilRefs(b.Header.References)
 		return b.Header, noNil(b.Lines), nil
 	case "810":
-		var b body810
+		var b Body810
 		if err := json.Unmarshal(raw, &b); err != nil {
 			return nil, nil, err
 		}
+		b.Header.References = noNilRefs(b.Header.References)
 		return b.Header, noNil(b.Lines), nil
 	}
 	return nil, nil, fmt.Errorf("no readable body for transaction set %q", x12.Printable(st01))
@@ -233,42 +153,34 @@ func noNil(l []Line) []Line {
 	return l
 }
 
-func optional(s string) *string {
-	if s == "" {
-		return nil
+func noNilRefs(r []Reference) []Reference {
+	if r == nil {
+		return []Reference{}
 	}
-	return &s
+	return r
 }
 
-func optionalNumber(s string) *json.Number {
-	if s == "" {
-		return nil
-	}
-	n := json.Number(decimal(s))
-	return &n
-}
-
-// isoDate turns CCYYMMDD into CCYY-MM-DD. The dictionary already guarantees the
+// ISODate turns CCYYMMDD into CCYY-MM-DD. The dictionary already guarantees the
 // shape; anything else comes back unchanged.
-func isoDate(s string) string {
+func ISODate(s string) string {
 	if len(s) != 8 {
 		return s
 	}
 	return s[:4] + "-" + s[4:6] + "-" + s[6:]
 }
 
-// decimal turns an X12 R value (digits, one point, optional minus) into a valid
+// Decimal turns an X12 R value (digits, one point, optional minus) into a valid
 // JSON number: no leading zeros, no bare point, no negative zero.
-func decimal(s string) string {
+func Decimal(s string) string {
 	neg := strings.HasPrefix(s, "-")
 	s = strings.TrimPrefix(s, "-")
 	whole, frac, _ := strings.Cut(s, ".")
 	return signed(neg, whole, frac)
 }
 
-// impliedDecimal turns an N2 value ("5250" with two implied decimals) into
+// ImpliedDecimal turns an N2 value ("5250" with two implied decimals) into
 // "52.50".
-func impliedDecimal(s string, places int) string {
+func ImpliedDecimal(s string, places int) string {
 	neg := strings.HasPrefix(s, "-")
 	digits := strings.TrimPrefix(s, "-")
 	if len(digits) <= places {

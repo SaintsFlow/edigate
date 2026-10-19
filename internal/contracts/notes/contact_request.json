@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "contact_requested: true when the note asks the receiver to get in touch, else false\nchannel values:\nemail: contact by email\nphone: contact by phone\nnone: no channel is named",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["contact_requested", "channel"],
+  "properties": {
+    "contact_requested": { "type": "boolean" },
+    "channel": { "enum": ["email", "phone", "none"] }
+  }
+}

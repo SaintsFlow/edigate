@@ -102,6 +102,14 @@ var dict = map[string][]elemDef{
 		el("128", mand, tID, 2, 3), el("127", cond, tAN, 1, 30), el("369", cond, tAN, 1, 45),
 		el("373", opt, tDT, 8, 8), el("337", cond, tTM, 4, 8), el("623", opt, tID, 2, 2),
 	},
+	// https://www.stedi.com/edi/x12-004010/segment/ADV
+	"ADV": {
+		el("559", mand, tID, 2, 2), el("1000", mand, tAN, 2, 2), el("740", opt, tR, 1, 20),
+		el("741", opt, tR, 1, 20), el("729", opt, tAN, 1, 6), el("1000", cond, tAN, 2, 2),
+		el("739", cond, tR, 1, 20),
+	},
+	// https://www.stedi.com/edi/x12-004010/segment/MTX
+	"MTX": {el("363", opt, tID, 3, 3), el("1551", cond, tAN, 1, 4096), el("1551", opt, tAN, 1, 4096), el("934", opt, tID, 2, 2)},
 	// https://www.stedi.com/edi/x12-004010/segment/MSG
 	"MSG": {el("933", mand, tAN, 1, 264), el("934", cond, tID, 2, 2), el("1470", opt, tN0, 1, 9)},
 	// https://www.stedi.com/edi/x12-004010/segment/N1

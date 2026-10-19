@@ -77,7 +77,7 @@ func wantRejected(t *testing.T, s *Set, ak304, ak403 string) {
 
 var testFiles = []string{
 	"850_min.edi", "850_full.edi", "850_two_sets.edi", "two_groups_850_997.edi", "810_full.edi",
-	"810_min.edi", "997_accepted.edi", "997_rejected.edi", "997_partial.edi", "850_alt_delims.edi",
+	"810_min.edi", "997_accepted.edi", "997_rejected.edi", "997_partial.edi", "850_alt_delims.edi", "850_adv.edi",
 }
 
 // K3: every reference file parses without errors and is written back byte for byte.
@@ -146,6 +146,42 @@ func TestParse810N1LoopHasN2AndPER(t *testing.T) {
 	if !paths["N1[1]/N2"] || !paths["N1[1]/PER"] {
 		t.Fatalf("paths: %v", paths)
 	}
+}
+
+func TestParseADVLoopOf850(t *testing.T) {
+	s := onlySet(t, testdata(t, "850_adv.edi"))
+	if len(s.Errors) != 0 {
+		t.Fatalf("errors: %+v", s.Errors)
+	}
+	paths := map[string]bool{}
+	for _, seg := range s.Segments {
+		paths[seg.Path] = true
+	}
+	for _, want := range []string{"ADV[1]/ADV", "ADV[1]/DTM", "ADV[1]/MTX", "ADV[2]/ADV", "ADV[2]/MTX"} {
+		if !paths[want] {
+			t.Errorf("no segment at %s: %v", want, paths)
+		}
+	}
+}
+
+func TestMTXTakesTextUpTo4096Characters(t *testing.T) {
+	long := strings.Repeat("A", 4096)
+	body := "BEG*00*SA*PO12345**20261018~" + n1 + "ADV*ZZ*AB~MTX*GEN*" + long + "*" + long + "~PO1*1*1*EA~CTT*1~"
+	if s := onlySet(t, wrap(t, "PO", "850", body)); len(s.Errors) != 0 {
+		t.Fatalf("errors: %+v", s.Errors)
+	}
+	body = strings.Replace(body, long+"~", long+"A~", 1)
+	wantRejected(t, onlySet(t, wrap(t, "PO", "850", body)), "", "")
+}
+
+func TestHeadingPERAnd810YNQ(t *testing.T) {
+	big := "BIG*20261018*INV1~"
+	tail := "IT1*1*1*EA*1~TDS*100~"
+	ok := wrap(t, "IN", "810", big+"REF*IV*X~PER*AR*NAME*EM*a@example.test~"+n1+tail)
+	if s := onlySet(t, ok); len(s.Errors) != 0 {
+		t.Fatalf("PER before N1 in an 810: %+v", s.Errors)
+	}
+	wantRejected(t, onlySet(t, wrap(t, "IN", "810", big+"YNQ*Y1~"+n1+tail)), SegUnrecognized, "")
 }
 
 const (
@@ -382,7 +418,9 @@ func TestGrammarFaults(t *testing.T) {
 		ak304 string
 	}{
 		{"NTE is not in an 850", "BEG*00*SA*PO12345**20261018~NTE*GEN*A NOTE~" + n1 + "PO1*1*1*EA~CTT*1~", SegNotInSet},
-		{"ADV is not supported", "BEG*00*SA*PO12345**20261018~ADV*X~PO1*1*1*EA~CTT*1~", SegUnrecognized},
+		{"ADV needs its two mandatory elements", "BEG*00*SA*PO12345**20261018~ADV*ZZ~PO1*1*1*EA~CTT*1~", ""},
+		{"MTX outside the ADV loop", "BEG*00*SA*PO12345**20261018~MTX*GEN*TEXT~PO1*1*1*EA~CTT*1~", SegNotInSequence},
+		{"ADV after the PO1 loop", "BEG*00*SA*PO12345**20261018~PO1*1*1*EA~ADV*ZZ*AB~CTT*1~", SegNotInSequence},
 		{"BEG is missing", n1 + "PO1*1*1*EA~CTT*1~", SegMandatoryMiss},
 		{"PO1 is missing", "BEG*00*SA*PO12345**20261018~CTT*0~", SegMandatoryMiss},
 		{"CTT is missing", "BEG*00*SA*PO12345**20261018~PO1*1*1*EA~", SegMandatoryMiss},

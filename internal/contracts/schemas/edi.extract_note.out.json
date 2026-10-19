@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_id", "values", "declassified"],
+  "properties": {
+    "schema_id": { "enum": ["delivery_instruction", "packaging", "contact_request"] },
+    "values": { "type": "object" },
+    "declassified": { "const": true }
+  }
+}

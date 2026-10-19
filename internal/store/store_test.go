@@ -16,7 +16,7 @@ func TestMigrationsApply(t *testing.T) {
 	if err := s.CheckMigrated(ctx); err != nil {
 		t.Fatalf("CheckMigrated: %v", err)
 	}
-	for _, table := range []string{"tenants", "principals", "audit_log", "partners", "edi_interchanges", "edi_documents", "edi_rejected"} {
+	for _, table := range []string{"tenants", "principals", "audit_log", "partners", "edi_interchanges", "edi_documents", "edi_rejected", "edi_notes", "quarantine_calls"} {
 		var n int
 		if err := pool.QueryRow(ctx, "SELECT count(*) FROM "+table).Scan(&n); err != nil {
 			t.Errorf("table %s: %v", table, err)

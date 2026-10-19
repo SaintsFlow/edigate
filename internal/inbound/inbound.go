@@ -33,9 +33,9 @@ import (
 	"strings"
 
 	"github.com/SaintsFlow/edigate/internal/edge"
-	"github.com/SaintsFlow/edigate/internal/edi/document"
 	"github.com/SaintsFlow/edigate/internal/edi/x12"
 	"github.com/SaintsFlow/edigate/internal/rpcerr"
+	"github.com/SaintsFlow/edigate/internal/sanitize"
 	"github.com/SaintsFlow/edigate/internal/store"
 )
 
@@ -256,7 +256,8 @@ func roleAllows(role, st01 string) bool {
 }
 
 // buildDocuments makes one row per set: rejected with the parser's errors,
-// rejected with role_not_allowed, or received with the typed body.
+// rejected with role_not_allowed, or received with the sanitized body and its
+// notes (internal/sanitize).
 //
 // The key (interchange, GS06, ST02) must be unique in the table. ST02 of a set
 // that repeats an earlier one, or that is not a valid ST02, is stored as "#n";
@@ -292,11 +293,17 @@ func buildDocuments(ic *x12.Interchange, partnerID, role string) ([]store.Inboun
 			case !roleAllows(role, st01):
 				d.Errors = []byte(`[{"reason":"role_not_allowed"}]`)
 			default:
-				built, err := document.Build(s, partnerID)
+				built, err := sanitize.Build(s, partnerID)
 				if err != nil {
 					return nil, err
 				}
 				d.Status, d.BusinessRef, d.Body = "received", built.BusinessRef, built.Body
+				for _, n := range built.Notes {
+					d.Notes = append(d.Notes, store.InboundNote{
+						Ref: n.Ref, SegmentPath: n.SegmentPath, Reason: n.Reason, Body: n.Text,
+						TaintLabel: n.TaintLabel, Canary: n.Canary,
+					})
+				}
 			}
 			docs = append(docs, d)
 		}

@@ -25,6 +25,7 @@ import (
 	"github.com/SaintsFlow/edigate/internal/edge"
 	"github.com/SaintsFlow/edigate/internal/inbound"
 	"github.com/SaintsFlow/edigate/internal/mcpserver"
+	"github.com/SaintsFlow/edigate/internal/quarantine"
 	"github.com/SaintsFlow/edigate/internal/store"
 	"github.com/SaintsFlow/edigate/internal/store/storetest"
 )
@@ -33,11 +34,13 @@ const gatewayID = "ZZ:ZZTESTSUPPL"
 
 // rig is a gateway on a throwaway database with tenants ta and tb.
 type rig struct {
-	t    *testing.T
-	st   *store.Store
-	pool *pgxpool.Pool
-	url  string
-	seq  atomic.Int64
+	t      *testing.T
+	st     *store.Store
+	pool   *pgxpool.Pool
+	url    string
+	seq    atomic.Int64
+	fake   *quarantine.Fake   // the model behind edi.extract_note
+	reader *quarantine.Reader // the reader on top of it; a test may shorten its Timeout
 }
 
 func newRig(t *testing.T) *rig {
@@ -45,14 +48,16 @@ func newRig(t *testing.T) *rig {
 	st, pool := storetest.New(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	r := &rig{t: t, st: st, pool: pool}
+	r := &rig{t: t, st: st, pool: pool, fake: &quarantine.Fake{}}
 	r.must(st.AddTenant(ctx, "ta", "Tenant A", gatewayID))
 	r.must(st.AddTenant(ctx, "tb", "Tenant B", "ZZ:ZZTESTSUPPB"))
 	r.must(st.AddTenant(ctx, "tc", "Tenant without an interchange id", ""))
 
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	gate := edge.NewGate(ctx, st, log)
-	sdk := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return mcpserver.New(st, log) },
+	r.reader = quarantine.NewReader(r.fake, "fake-model", st)
+	mcpServer := mcpserver.New(st, r.reader, log) // one server: it holds the buckets of the tools
+	sdk := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return mcpServer },
 		&mcp.StreamableHTTPOptions{Stateless: true, JSONResponse: true})
 	mux := http.NewServeMux()
 	mux.Handle("/mcp", gate.MCP(sdk))
@@ -166,6 +171,29 @@ func (r *rig) call(token, tool string, args map[string]any) (json.RawMessage, *j
 		r.t.Fatal("the answer has no text content")
 	}
 	return json.RawMessage(text.Text), nil
+}
+
+// callTimes runs a tool n times in one session, as fast as it goes, and returns
+// the error of each call (nil for a call that worked).
+func (r *rig) callTimes(token, tool string, args map[string]any, n int) []*jsonrpc.Error {
+	r.t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	transport := &mcp.StreamableClientTransport{Endpoint: r.url + "/mcp", DisableStandaloneSSE: true,
+		HTTPClient: &http.Client{Transport: bearer{token}}}
+	cs, err := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "0"}, nil).Connect(ctx, transport, nil)
+	r.must(err)
+	defer cs.Close()
+	var errs []*jsonrpc.Error
+	for i := 0; i < n; i++ {
+		_, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: tool, Arguments: args})
+		var wire *jsonrpc.Error
+		if err != nil && !errors.As(err, &wire) {
+			r.t.Fatal(err)
+		}
+		errs = append(errs, wire)
+	}
+	return errs
 }
 
 type bearer struct{ token string }
@@ -571,7 +599,7 @@ func TestReadDocumentReturnsTypedFields(t *testing.T) {
 	}
 	r.must(json.Unmarshal(doc, &got))
 	if got.ID != id || got.ST01 != "850" || got.Status != "received" || got.Header["business_ref"] != "PO20002" ||
-		got.Header["ship_to"] != "DC01" || len(got.Lines) != 3 || got.Notes == nil || len(got.Notes) != 0 {
+		got.Header["ship_to"] != "DC01" || len(got.Lines) != 3 || len(got.Notes) != 9 {
 		t.Fatalf("document: %s", doc)
 	}
 	if !strings.Contains(string(doc), `"unit_price":12.50`) {

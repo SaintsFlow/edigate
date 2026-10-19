@@ -51,7 +51,7 @@ func TestListInboxEndToEnd(t *testing.T) {
 	}
 
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	srv := mcpserver.New(st, log)
+	srv := mcpserver.New(st, nil, log)
 	sdk := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return srv },
 		&mcp.StreamableHTTPOptions{Stateless: true, JSONResponse: true})
 	ts := httptest.NewServer(edge.NewGate(ctx, st, log).MCP(sdk))

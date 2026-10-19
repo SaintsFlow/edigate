@@ -1,5 +1,6 @@
 // Package contracts holds the JSON Schemas (draft 2020-12) of tool inputs and
-// outputs. The schema files are embedded; Validate checks raw tool arguments
+// outputs, and the closed schemas of the quarantined reader's answers
+// (notes/). The schema files are embedded; Validate checks raw tool arguments
 // against the input schema before any service is called.
 package contracts
 
@@ -8,12 +9,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"sync"
 
 	"github.com/google/jsonschema-go/jsonschema"
 )
 
-//go:embed schemas/*.json
+//go:embed schemas/*.json notes/*.json
 var files embed.FS
 
 // ErrInvalid marks arguments or results that do not match their schema.
@@ -36,13 +38,51 @@ func Output(tool string) (json.RawMessage, error) {
 
 // Validate checks raw tool arguments against the input schema of the tool.
 // Empty arguments count as an empty object. The error wraps ErrInvalid.
-func Validate(tool string, raw []byte) error { return check(tool+".in", raw, true) }
+func Validate(tool string, raw []byte) error { return check("schemas/"+tool+".in.json", raw, true) }
 
 // ValidateOutput checks a tool result against the output schema.
-func ValidateOutput(tool string, raw []byte) error { return check(tool+".out", raw, false) }
+func ValidateOutput(tool string, raw []byte) error {
+	return check("schemas/"+tool+".out.json", raw, false)
+}
 
-func check(name string, raw []byte, emptyIsObject bool) error {
-	rs, err := load(name)
+// NoteSchema returns the closed schema that edi.extract_note answers with for
+// schemaID (notes/<schemaID>.json), as the model's response format.
+func NoteSchema(schemaID string) (json.RawMessage, error) {
+	if !validID.MatchString(schemaID) {
+		return nil, fmt.Errorf("unknown note schema %q", schemaID)
+	}
+	return files.ReadFile("notes/" + schemaID + ".json")
+}
+
+// NoteDescription returns the top-level "description" of a note schema: one
+// line per value, for the system prompt of the quarantined reader.
+func NoteDescription(schemaID string) (string, error) {
+	raw, err := NoteSchema(schemaID)
+	if err != nil {
+		return "", err
+	}
+	var s struct {
+		Description string `json:"description"`
+	}
+	if err := json.Unmarshal(raw, &s); err != nil {
+		return "", err
+	}
+	return s.Description, nil
+}
+
+// ValidateNote checks the model's answer against the note schema schemaID.
+func ValidateNote(schemaID string, raw []byte) error {
+	if !validID.MatchString(schemaID) {
+		return fmt.Errorf("%w: unknown note schema", ErrInvalid)
+	}
+	return check("notes/"+schemaID+".json", raw, false)
+}
+
+// validID keeps a schema id from the caller out of file paths.
+var validID = regexp.MustCompile(`^[a-z_]{1,40}$`)
+
+func check(path string, raw []byte, emptyIsObject bool) error {
+	rs, err := load(path)
 	if err != nil {
 		return err
 	}
@@ -59,24 +99,24 @@ func check(name string, raw []byte, emptyIsObject bool) error {
 	return nil
 }
 
-func load(name string) (*jsonschema.Resolved, error) {
+func load(path string) (*jsonschema.Resolved, error) {
 	mu.Lock()
 	defer mu.Unlock()
-	if rs, ok := resolved[name]; ok {
+	if rs, ok := resolved[path]; ok {
 		return rs, nil
 	}
-	data, err := files.ReadFile("schemas/" + name + ".json")
+	data, err := files.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("unknown schema %q: %w", name, err)
+		return nil, fmt.Errorf("unknown schema %q: %w", path, err)
 	}
 	var s jsonschema.Schema
 	if err := json.Unmarshal(data, &s); err != nil {
-		return nil, fmt.Errorf("schema %q: %w", name, err)
+		return nil, fmt.Errorf("schema %q: %w", path, err)
 	}
 	rs, err := s.Resolve(nil)
 	if err != nil {
-		return nil, fmt.Errorf("schema %q: %w", name, err)
+		return nil, fmt.Errorf("schema %q: %w", path, err)
 	}
-	resolved[name] = rs
+	resolved[path] = rs
 	return rs, nil
 }

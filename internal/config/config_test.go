@@ -38,3 +38,24 @@ func TestLoad(t *testing.T) {
 		t.Error("bad listen address must fail")
 	}
 }
+
+func TestLoadQuarantine(t *testing.T) {
+	t.Setenv("EDIGATE_DB_URL", "postgres://example/db")
+	t.Setenv("EDIGATE_LISTEN", "")
+	t.Setenv("EDIGATE_QUARANTINE_BASE_URL", "")
+	t.Setenv("EDIGATE_QUARANTINE_MODEL", "")
+	t.Setenv("EDIGATE_QUARANTINE_API_KEY", "")
+	if c, err := Load(""); err != nil || c.QuarantineModel != "" {
+		t.Fatalf("no model is allowed (the tool is off): %+v %v", c, err)
+	}
+	t.Setenv("EDIGATE_QUARANTINE_MODEL", "llama3.2:3b")
+	if _, err := Load(""); err == nil {
+		t.Error("a model without a base URL must fail")
+	}
+	t.Setenv("EDIGATE_QUARANTINE_BASE_URL", "http://127.0.0.1:11434/v1")
+	t.Setenv("EDIGATE_QUARANTINE_API_KEY", "k")
+	c, err := Load("")
+	if err != nil || c.QuarantineBaseURL != "http://127.0.0.1:11434/v1" || c.QuarantineModel != "llama3.2:3b" || c.QuarantineAPIKey != "k" {
+		t.Fatalf("quarantine settings: %+v %v", c, err)
+	}
+}

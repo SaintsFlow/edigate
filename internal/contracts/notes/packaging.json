@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "packaging values:\nstandard: ordinary shipping packaging\npallet: goods packed on pallets\ncarton: goods packed in cartons\nmixed: pallets and cartons together\nnone: the note says nothing about packaging\nmax_pallet_height_cm: the highest allowed pallet in centimeters, 0 when the note gives no height",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["packaging", "max_pallet_height_cm"],
+  "properties": {
+    "packaging": { "enum": ["standard", "pallet", "carton", "mixed", "none"] },
+    "max_pallet_height_cm": { "type": "integer", "minimum": 0, "maximum": 300 }
+  }
+}

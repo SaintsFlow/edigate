@@ -5,10 +5,12 @@ package tools
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"time"
 
 	"github.com/SaintsFlow/edigate/internal/edi/document"
+	"github.com/SaintsFlow/edigate/internal/quarantine"
 	"github.com/SaintsFlow/edigate/internal/rpcerr"
 	"github.com/SaintsFlow/edigate/internal/store"
 )
@@ -62,11 +64,13 @@ type ReadDocumentInput struct {
 	DocumentID string `json:"document_id"`
 }
 
-// Note points at a piece of free text of the document. The text itself is not
-// part of the answer; notes arrive with wave 2-3, so the list is empty for now.
+// Note points at a piece of partner text that is kept out of the document: free
+// text, or an element that failed its format. The text itself is not part of the
+// answer.
 type Note struct {
 	Ref         string `json:"ref"`
 	SegmentPath string `json:"segment_path"`
+	Reason      string `json:"reason"`
 }
 
 // ReadDocumentOutput is the result of edi.read_document: typed fields only.
@@ -93,5 +97,55 @@ func ReadDocument(ctx context.Context, st *store.Store, tenantID string, in Read
 	if err != nil {
 		return ReadDocumentOutput{}, err
 	}
-	return ReadDocumentOutput{ID: d.ID, ST01: d.ST01, Status: d.Status, Header: header, Lines: lines, Notes: []Note{}}, nil
+	refs, err := st.ListNotes(ctx, tenantID, d.ID)
+	if err != nil {
+		return ReadDocumentOutput{}, err
+	}
+	notes := make([]Note, 0, len(refs))
+	for _, r := range refs {
+		notes = append(notes, Note{Ref: r.Ref, SegmentPath: r.SegmentPath, Reason: r.Reason})
+	}
+	return ReadDocumentOutput{ID: d.ID, ST01: d.ST01, Status: d.Status, Header: header, Lines: lines, Notes: notes}, nil
+}
+
+// ExtractNoteInput is the validated input of edi.extract_note.
+type ExtractNoteInput struct {
+	DocumentID string `json:"document_id"`
+	Ref        string `json:"ref"`
+	SchemaID   string `json:"schema_id"`
+}
+
+// ExtractNoteOutput is the result of edi.extract_note: only the values of the
+// closed schema, always declassified.
+type ExtractNoteOutput struct {
+	SchemaID     string          `json:"schema_id"`
+	Values       json.RawMessage `json:"values"`
+	Declassified bool            `json:"declassified"`
+}
+
+// ExtractNote reads one note through the quarantined reader. A note that is not
+// of this tenant, of a hidden document or unknown gives not_found; a missing or
+// refused answer of the model gives quarantine_invalid. The text of the note is
+// never part of the answer.
+func ExtractNote(ctx context.Context, st *store.Store, reader quarantine.QuarantinedReader, tenantID, traceID string, in ExtractNoteInput) (ExtractNoteOutput, error) {
+	n, err := st.ReadNote(ctx, tenantID, in.DocumentID, in.Ref)
+	if errors.Is(err, store.ErrNotFound) {
+		return ExtractNoteOutput{}, rpcerr.New(rpcerr.NotFound, "")
+	}
+	if err != nil {
+		return ExtractNoteOutput{}, err
+	}
+	if reader == nil {
+		return ExtractNoteOutput{}, rpcerr.New(rpcerr.QuarantineInvalid, "")
+	}
+	values, err := reader.Extract(ctx, quarantine.Note{
+		TenantID: tenantID, TraceID: traceID, DocumentID: in.DocumentID, Ref: in.Ref, Text: n.Body, Canary: n.Canary,
+	}, in.SchemaID)
+	if errors.Is(err, quarantine.ErrInvalid) {
+		return ExtractNoteOutput{}, rpcerr.New(rpcerr.QuarantineInvalid, "")
+	}
+	if err != nil {
+		return ExtractNoteOutput{}, err
+	}
+	return ExtractNoteOutput{SchemaID: in.SchemaID, Values: values, Declassified: true}, nil
 }

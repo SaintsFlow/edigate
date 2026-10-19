@@ -21,6 +21,11 @@ services:
     environment:
       EDIGATE_DB_URL: postgres://edigate:edigate@postgres:5432/edigate?sslmode=disable
       EDIGATE_LISTEN: 0.0.0.0:8080
+      # The quarantined reader: a model on the host (Ollama), reached from the container.
+      EDIGATE_QUARANTINE_BASE_URL: http://host.docker.internal:11434/v1
+      EDIGATE_QUARANTINE_MODEL: llama3.2:3b
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
       - "127.0.0.1:18080:8080"
     depends_on:
