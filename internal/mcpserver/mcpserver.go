@@ -34,6 +34,9 @@ const (
 
 	createSalesOrder  = tools.CreateOrderTool
 	postVendorInvoice = tools.PostInvoiceTool
+	confirmOrder      = tools.ConfirmOrderTool
+	wmsReserve        = tools.WMSReserveTool
+	sendASN           = tools.SendASNTool
 	txnStatus         = "txn.status"
 )
 
@@ -138,8 +141,41 @@ func New(st *store.Store, reader quarantine.QuarantinedReader, dec tools.Decider
 			}
 			return tools.PostVendorInvoice(ctx, st, dec, callerOf(id), in)
 		})
+	s.add(srv, confirmOrder, "Confirm a sales order to the partner with an order acknowledgment (855). Pass the txn_id "+
+		"that erp.create_sales_order gave and the kind of answer: AC (accepted), AD (accepted with changes) or RJ "+
+		"(rejected). The gateway builds the document from the order. It cannot be taken back, so a rejection or "+
+		"an amount far from the order waits for an operator: the answer is pending_approval. The document leaves "+
+		"after the order exists in the ERP. Use txn.status to follow it: saga_state turns done when the partner "+
+		"has acknowledged it.",
+		func(ctx context.Context, id edge.Identity, args json.RawMessage) (any, error) {
+			var in tools.ConfirmOrderInput
+			if err := json.Unmarshal(args, &in); err != nil {
+				return nil, rpcerr.New(rpcerr.SchemaInvalid, "")
+			}
+			return tools.ConfirmOrder(ctx, st, dec, callerOf(id), in)
+		})
+	s.add(srv, wmsReserve, "Reserve the lines of a sales order in the warehouse. Pass the txn_id that "+
+		"erp.create_sales_order gave. Calling again returns the same txn_id. Use txn.status to follow it.",
+		func(ctx context.Context, id edge.Identity, args json.RawMessage) (any, error) {
+			var in tools.OrderRefInput
+			if err := json.Unmarshal(args, &in); err != nil {
+				return nil, rpcerr.New(rpcerr.SchemaInvalid, "")
+			}
+			return tools.WMSReserve(ctx, st, dec, callerOf(id), in)
+		})
+	s.add(srv, sendASN, "Ship a reserved order and notify the partner with a ship notice (856). Pass the txn_id "+
+		"that erp.create_sales_order gave; the reservation (wms.reserve) must be done first. The gateway builds the "+
+		"notice from what the warehouse shipped, with the SSCC of every pack. It cannot be taken back, so a "+
+		"shipment that differs much from the order waits for an operator. One notice per order.",
+		func(ctx context.Context, id edge.Identity, args json.RawMessage) (any, error) {
+			var in tools.OrderRefInput
+			if err := json.Unmarshal(args, &in); err != nil {
+				return nil, rpcerr.New(rpcerr.SchemaInvalid, "")
+			}
+			return tools.SendASN(ctx, st, dec, callerOf(id), in)
+		})
 	s.add(srv, txnStatus, "Show where a transaction stands: accepted (queued), completed (the effect is confirmed, "+
-		"with the reference of the other system) or rejected.",
+		"with the reference of the other system) or rejected. For a step of a saga it also shows saga_state.",
 		func(ctx context.Context, id edge.Identity, args json.RawMessage) (any, error) {
 			var in tools.TxnStatusInput
 			if err := json.Unmarshal(args, &in); err != nil {

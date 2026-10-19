@@ -153,3 +153,39 @@ func TestMockOnecVendorInvoices(t *testing.T) {
 		t.Errorf("a refused invoice: %d (invoices %d), want 422 and 1", code, count())
 	}
 }
+
+// The cancel is the compensation of an order (wave 2-7): it is idempotent, it does nothing
+// for an order that is not there, and MOCK_FAIL_CANCEL makes it answer 500.
+func TestMockOnecCancelIsIdempotent(t *testing.T) {
+	_, pool := storetest.New(t)
+	ctx := context.Background()
+	if err := server.Migrate(ctx, pool); err != nil {
+		t.Fatal(err)
+	}
+	s := server.New(pool, server.Config{})
+	ts := httptest.NewServer(s.Handler())
+	defer ts.Close()
+	status := func() (st string) {
+		_ = pool.QueryRow(ctx, `SELECT status FROM mock_onec.sales_orders WHERE external_id = 'EXT'`).Scan(&st)
+		return st
+	}
+
+	if code, _ := do(t, "POST", ts.URL+"/hs/orders", order); code != 201 {
+		t.Fatalf("post: %d", code)
+	}
+	for range 2 {
+		if code, body := do(t, "POST", ts.URL+"/hs/orders/EXT/cancel", ""); code != 200 || !strings.Contains(body, `"status":"cancelled"`) {
+			t.Fatalf("cancel: %d %s", code, body)
+		}
+	}
+	if status() != "cancelled" {
+		t.Errorf("status = %q, want cancelled", status())
+	}
+	if code, _ := do(t, "POST", ts.URL+"/hs/orders/NOTHING/cancel", ""); code != 200 {
+		t.Errorf("cancel of an order that is not there: %d, want 200", code)
+	}
+	s.SetFailCancel(true)
+	if code, _ := do(t, "POST", ts.URL+"/hs/orders/EXT/cancel", ""); code != 500 {
+		t.Errorf("cancel with MOCK_FAIL_CANCEL: %d, want 500", code)
+	}
+}

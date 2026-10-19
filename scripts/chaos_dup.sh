@@ -105,7 +105,10 @@ until curl -fsS -o /dev/null http://127.0.0.1:18080/healthz 2>/dev/null; do
 done
 
 # Fresh data: the rows of an earlier run of this tenant go (audit rows stay: the log is append-only).
-sql "DELETE FROM outbox WHERE tenant_id = '$TENANT'" "DELETE FROM idempotency_keys WHERE tenant_id = '$TENANT'" \
+sql "DELETE FROM outbound_docs WHERE tenant_id = '$TENANT'" \
+	"DELETE FROM saga_steps WHERE saga_id IN (SELECT id FROM sagas WHERE tenant_id = '$TENANT')" "DELETE FROM sagas WHERE tenant_id = '$TENANT'" \
+	"DELETE FROM approvals WHERE tenant_id = '$TENANT'" "DELETE FROM daily_auto_totals WHERE tenant_id = '$TENANT'" \
+	"DELETE FROM outbox WHERE tenant_id = '$TENANT'" "DELETE FROM idempotency_keys WHERE tenant_id = '$TENANT'" \
 	"DELETE FROM edi_notes WHERE tenant_id = '$TENANT'" "DELETE FROM edi_documents WHERE tenant_id = '$TENANT'" \
 	"DELETE FROM edi_interchanges WHERE tenant_id = '$TENANT'" "DELETE FROM edi_rejected WHERE tenant_id = '$TENANT'" \
 	"DELETE FROM mock_onec.sales_orders WHERE tenant_id = '$TENANT'" >/dev/null

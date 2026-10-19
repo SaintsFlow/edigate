@@ -104,6 +104,9 @@ type ReserveInput struct {
 	// conflicting duplicate opens (nil: no review).
 	ReviewView []byte
 
+	// Saga ties the key to a step of a saga, in the same transaction (nil: no saga).
+	Saga *SagaLink
+
 	// BeforeOutbox is for tests: it runs after the key is written and before the
 	// outbox row; an error from it rolls the whole reservation back.
 	BeforeOutbox func() error
@@ -215,6 +218,9 @@ func (s *Store) Reserve(ctx context.Context, in ReserveInput) (Reserved, error) 
 		return Reserved{Outcome: ReservedConflict}, nil
 	}
 
+	if err := linkSaga(ctx, tx, in); err != nil {
+		return Reserved{}, err
+	}
 	if err := markProcessed(ctx, tx, in); err != nil {
 		return Reserved{}, err
 	}
@@ -255,6 +261,9 @@ func (s *Store) finishReservation(ctx context.Context, tx pgx.Tx, in ReserveInpu
 			return Reserved{Outcome: ReservedDenied, Verdict: v}, nil // the deferred rollback drops the key
 		}
 	}
+	if err := linkSaga(ctx, tx, in); err != nil {
+		return Reserved{}, err
+	}
 	if v.Approval != "none" {
 		return s.requestApproval(ctx, tx, in, txnID, v)
 	}
@@ -272,10 +281,8 @@ func (s *Store) finishReservation(ctx context.Context, tx pgx.Tx, in ReserveInpu
 			return Reserved{}, fmt.Errorf("count the order in the daily total: %w", err)
 		}
 	}
-	if _, err := tx.Exec(ctx,
-		`INSERT INTO outbox (tenant_id, idem_key, effect_type, payload, status) VALUES ($1, $2, $3, $4, 'pending')`,
-		in.TenantID, in.Key, in.EffectType, in.Payload); err != nil {
-		return Reserved{}, fmt.Errorf("enqueue the effect: %w", err)
+	if err := s.enqueue(ctx, tx, in.TenantID, in.Key, in.EffectType, in.Payload); err != nil {
+		return Reserved{}, err
 	}
 	ev := auditOf(in, "effect_reserved", outcome, nil)
 	ev.PolicyExplain = v.Explain
@@ -327,6 +334,7 @@ type TxnState struct {
 	State        string // reserved, completed, failed or reopened
 	ResultStatus string // the recorded status: accepted, pending_approval, rejected or expired
 	ExternalRef  string
+	SagaState    string // the state of the saga the key is a step of; "" when it is not
 }
 
 // TxnState reads the key with this txn_id. A key of another tenant and an
@@ -336,9 +344,11 @@ func (s *Store) TxnState(ctx context.Context, tenantID, txnID string) (TxnState,
 	err := s.pool.QueryRow(ctx,
 		`SELECT k.state, COALESCE(k.result->>'status', ''),
 		        COALESCE((SELECT o.external_ref FROM outbox o
-		                  WHERE o.idem_key = k.key AND o.external_ref IS NOT NULL ORDER BY o.id DESC LIMIT 1), '')
+		                  WHERE o.idem_key = k.key AND o.external_ref IS NOT NULL ORDER BY o.id DESC LIMIT 1), ''),
+		        COALESCE((SELECT sg.state FROM saga_steps ss JOIN sagas sg ON sg.id = ss.saga_id
+		                  WHERE ss.idem_key = k.key LIMIT 1), '')
 		 FROM idempotency_keys k WHERE k.tenant_id = $1 AND k.txn_id = $2::uuid`, tenantID, txnID).
-		Scan(&t.State, &t.ResultStatus, &t.ExternalRef)
+		Scan(&t.State, &t.ResultStatus, &t.ExternalRef, &t.SagaState)
 	if isNoRows(err) {
 		return TxnState{}, ErrNotFound
 	}
@@ -399,16 +409,28 @@ type Claim struct {
 // so workers and processes never take the same row). It returns nil when there is
 // none. A process that dies while holding a claim loses the lock with its
 // connection and the row is taken again.
-func (s *Store) ClaimOutbox(ctx context.Context) (*Claim, error) {
+//
+// The row of a saga step waits until every earlier step of its saga has completed
+// (invariant I5): the 855 does not leave before the order exists in the ERP. Rows of the
+// effect types in skip are left alone (a relay that cannot deliver them).
+func (s *Store) ClaimOutbox(ctx context.Context, skip ...string) (*Claim, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return nil, err
 	}
 	c := &Claim{tx: tx}
+	if skip == nil {
+		skip = []string{} // an empty list, not NULL: "<> ALL(NULL)" would match nothing
+	}
 	err = tx.QueryRow(ctx,
 		`SELECT id, tenant_id, idem_key, effect_type, payload, attempts FROM outbox
-		 WHERE status = 'pending' AND next_attempt_at <= now()
-		 ORDER BY id LIMIT 1 FOR UPDATE SKIP LOCKED`).
+		 WHERE status = 'pending' AND next_attempt_at <= now() AND effect_type <> ALL($1::text[])
+		   AND NOT EXISTS (
+		       SELECT 1 FROM saga_steps cur
+		       JOIN saga_steps prev ON prev.saga_id = cur.saga_id AND prev.step_no < cur.step_no
+		       JOIN idempotency_keys pk ON pk.key = prev.idem_key
+		       WHERE cur.idem_key = outbox.idem_key AND pk.state <> 'completed')
+		 ORDER BY id LIMIT 1 FOR UPDATE SKIP LOCKED`, skip).
 		Scan(&c.Row.ID, &c.Row.TenantID, &c.Row.Key, &c.Row.EffectType, &c.Row.Payload, &c.Row.Attempts)
 	if isNoRows(err) {
 		_ = tx.Rollback(ctx)

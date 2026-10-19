@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/SaintsFlow/edigate/internal/decimal"
 	"github.com/SaintsFlow/edigate/internal/edi/document"
 	"github.com/SaintsFlow/edigate/internal/store"
 )
@@ -109,23 +110,5 @@ func BuildOrder(h document.Header850, lines []document.Line, partnerID, ref, del
 
 func isNoteRef(s string) bool { return strings.HasPrefix(s, "$note_") }
 
-// parseScaled reads a non-negative decimal ("12", "12.5") into an integer count
-// of 10^-scale. It fails for a sign, an exponent, anything but digits and one
-// point, and for more decimal places than scale.
-func parseScaled(s string, scale int) (*big.Int, bool) {
-	whole, frac, _ := strings.Cut(s, ".")
-	if whole == "" || len(frac) > scale || strings.Trim(whole+frac, "0123456789") != "" {
-		return nil, false
-	}
-	n, ok := new(big.Int).SetString(whole+frac+strings.Repeat("0", scale-len(frac)), 10)
-	return n, ok
-}
-
-// formatScaled writes n (a count of 10^-scale) as a decimal string with scale places.
-func formatScaled(n *big.Int, scale int) string {
-	digits := n.String()
-	if len(digits) <= scale {
-		digits = strings.Repeat("0", scale-len(digits)+1) + digits
-	}
-	return digits[:len(digits)-scale] + "." + digits[len(digits)-scale:]
-}
+// The decimal helpers live in internal/decimal; the outgoing documents use them too.
+var parseScaled, formatScaled = decimal.ParseScaled, decimal.FormatScaled

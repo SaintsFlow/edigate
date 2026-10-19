@@ -7,7 +7,7 @@
 //	edigatectl call --url URL --token TOKEN <tool> [JSON-arguments]
 //	edigatectl parse <file>
 //	edigatectl send --url URL --token T --from Q:ID --to Q:ID --file F [--message-id ID]
-//	edigatectl fixtures load <fixtures.json>
+//	edigatectl fixtures load <fixtures.json> [--partner-tokens-out <file>]
 //	edigatectl txn reopen --url URL --token OPERATOR_TOKEN <key-hex>
 //	edigatectl approvals list|approve|reject --url URL --token OPERATOR_TOKEN [--status S] [id]
 //
@@ -17,7 +17,9 @@
 // "call" is a debugging MCP client. "parse" reads a file with the strict X12
 // parser and needs no database. "send" posts an interchange to /edi/inbound.
 // "fixtures load" reads the file of the corpus generator (tenant, partners with
-// limits, price list) and is safe to run again. "txn reopen" is an operator
+// limits, price list) and is safe to run again. With --partner-tokens-out it also issues
+// a token to each customer partner that has none and adds it to the JSON file
+// partner-emulator reads. "txn reopen" is an operator
 // action and goes over HTTP to /ops/ of the gateway at URL (for example
 // http://127.0.0.1:18080), so the audit log knows the operator. "approvals" lists
 // the approval requests of the operator's tenant and approves or rejects one; a
@@ -58,7 +60,7 @@ const usage = `usage:
   edigatectl call --url URL --token TOKEN <tool> [JSON-arguments]
   edigatectl parse <file>
   edigatectl send --url URL --token T --from Q:ID --to Q:ID --file F [--message-id ID]
-  edigatectl fixtures load <fixtures.json>
+  edigatectl fixtures load <fixtures.json> [--partner-tokens-out <file>]
   edigatectl txn reopen --url URL --token OPERATOR_TOKEN <key-hex>
   edigatectl approvals list|approve|reject --url URL --token OPERATOR_TOKEN [--status S] [id]
 `
@@ -106,10 +108,10 @@ func run(ctx context.Context, args []string, stdout io.Writer) error {
 	case "send":
 		return send(ctx, args[1:], stdout)
 	case "fixtures":
-		if len(args) == 3 && args[1] == "load" {
-			return fixturesLoad(ctx, args[2], stdout)
+		if len(args) >= 3 && args[1] == "load" {
+			return fixturesLoad(ctx, args[2:], stdout)
 		}
-		return usageError{"fixtures: expected: load <fixtures.json>"}
+		return usageError{"fixtures: expected: load <fixtures.json> [--partner-tokens-out <file>]"}
 	case "txn":
 		if len(args) >= 2 && args[1] == "reopen" {
 			return txnReopen(ctx, args[2:], stdout)

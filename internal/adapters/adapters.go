@@ -13,6 +13,24 @@ import (
 	"fmt"
 )
 
+// The effect types of the outbox. The first two are the order and the supplier invoice
+// (mock-1c); the rest come with the sagas: the compensations (cancel, release), the
+// warehouse (mock-wms) and the documents sent to a partner.
+const (
+	EffectCreateOrder = "onec.create_order"
+	EffectCancelOrder = "onec.cancel_order"
+	EffectWMSReserve  = "wms.reserve"
+	EffectWMSRelease  = "wms.release"
+	EffectWMSShip     = "wms.ship"
+	EffectSend855     = "edi.send_855"
+	EffectSend856     = "edi.send_856"
+)
+
+// IsSend reports whether the effect is a document sent to a partner.
+func IsSend(effectType string) bool {
+	return effectType == EffectSend855 || effectType == EffectSend856
+}
+
 // Effect is one outbox row as an adapter sees it. ExternalID is the idempotency
 // key in hex: the other system uses it to take a repeated delivery only once (I4).
 type Effect struct {

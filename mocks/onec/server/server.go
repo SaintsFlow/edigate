@@ -69,6 +69,7 @@ type Config struct {
 	FailAfterCommitRate float64       // MOCK_FAIL_AFTER_COMMIT_RATE: 0 to 1
 	Latency             time.Duration // MOCK_LATENCY_MS
 	RejectRefPrefix     string        // MOCK_REJECT_REF_PREFIX; "" rejects nothing
+	FailCancel          bool          // MOCK_FAIL_CANCEL: every cancel answers 500 (the test of a failed compensation)
 }
 
 // Server is the HTTP handler of the mock.
@@ -95,6 +96,13 @@ func (s *Server) SetRejectRefPrefix(prefix string) {
 	s.mu.Unlock()
 }
 
+// SetFailCancel makes every cancel answer 500 (or stops doing so).
+func (s *Server) SetFailCancel(fail bool) {
+	s.mu.Lock()
+	s.cfg.FailCancel = fail
+	s.mu.Unlock()
+}
+
 func (s *Server) config() Config {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -106,6 +114,7 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /hs/orders", s.create)
 	mux.HandleFunc("GET /hs/orders", s.lookup)
+	mux.HandleFunc("POST /hs/orders/{external_id}/cancel", s.cancel)
 	mux.HandleFunc("POST /hs/vendor-invoices", s.createInvoice)
 	mux.HandleFunc("GET /hs/vendor-invoices", s.lookupInvoice)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -186,6 +195,33 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 	default:
 		reply(w, http.StatusInternalServerError, map[string]string{"error": "write failed"})
 	}
+}
+
+// cancel is the compensation of an order. It is idempotent: an order that is there becomes
+// cancelled (again), an order that is not there is left alone and the answer is the same.
+func (s *Server) cancel(w http.ResponseWriter, r *http.Request) {
+	cfg := s.config()
+	if cfg.Latency > 0 {
+		select {
+		case <-time.After(cfg.Latency):
+		case <-r.Context().Done():
+			return
+		}
+	}
+	if cfg.FailCancel {
+		reply(w, http.StatusInternalServerError, map[string]string{"error": "cancel failed"})
+		return
+	}
+	ext := r.PathValue("external_id")
+	var n int
+	err := s.pool.QueryRow(r.Context(),
+		`WITH c AS (UPDATE mock_onec.sales_orders SET status = 'cancelled' WHERE external_id = $1 RETURNING 1)
+		 SELECT count(*) FROM c`, ext).Scan(&n)
+	if err != nil {
+		reply(w, http.StatusInternalServerError, map[string]string{"error": "write failed"})
+		return
+	}
+	reply(w, http.StatusOK, map[string]any{"external_id": ext, "status": "cancelled", "found": n > 0})
 }
 
 func (s *Server) lookup(w http.ResponseWriter, r *http.Request) {

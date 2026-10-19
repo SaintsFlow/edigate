@@ -6,6 +6,8 @@ coverage.*
 __pycache__/
 .venv/
 bench/out/
+# tokens of the stand's partners, written by scripts/smoke.sh and read by partner-emulator
+deploy/compose/stand/partner_tokens.json
 
 # working files of the author
 AGENTS.md

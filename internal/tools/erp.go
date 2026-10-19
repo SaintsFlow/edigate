@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
+	"github.com/SaintsFlow/edigate/internal/adapters"
 	"github.com/SaintsFlow/edigate/internal/edi/document"
 	"github.com/SaintsFlow/edigate/internal/policy"
 	"github.com/SaintsFlow/edigate/internal/rpcerr"
@@ -107,13 +109,31 @@ func CreateSalesOrder(ctx context.Context, st *store.Store, dec Decider, c Calle
 		"lines": payload.Lines, "total": payload.Total, "currency": payload.Currency,
 		"delivery_instruction": payload.DeliveryInstruction,
 	}
+	kept, err := json.Marshal(sagaOrder{OrderPayload: payload, OrderDate: compactDate(h.OrderDate)})
+	if err != nil {
+		return OrderResult{}, err
+	}
 	return reserveEffect(ctx, st, dec, c, effectRequest{
 		Tool: CreateOrderTool, EffectType: effectCreateOrder, Src: src, ST01: "850",
 		Effect: payload, AmountCents: amount, Counted: true, ViewArgs: view,
 		Key: txn.Key(c.TenantID, CreateOrderTool, src.PartnerID, src.BKRef), BusinessKey: businessKey,
 		ReqHash: reqHash, Payload: rawPayload,
+		Saga: &store.SagaLink{
+			Kind: "order", StepNo: 1, Steps: []string{adapters.EffectCreateOrder, adapters.EffectSend855},
+			Payload: kept, SourceDocumentID: src.ID,
+		},
 	})
 }
+
+// sagaOrder is what the sagas keep of the order: the effect as the gateway built it and the
+// date of the 850 (CCYYMMDD). The documents sent later are made from it.
+type sagaOrder struct {
+	txn.OrderPayload
+	OrderDate string `json:"order_date"`
+}
+
+// compactDate turns YYYY-MM-DD into CCYYMMDD.
+func compactDate(iso string) string { return strings.ReplaceAll(iso, "-", "") }
 
 func deref(s *string) string {
 	if s == nil {
@@ -128,11 +148,13 @@ type TxnStatusInput struct {
 }
 
 // TxnStatusOutput is the answer of txn.status. ExternalRef is null until the
-// effect is delivered. saga_state arrives with the sagas of wave 2-7.
+// effect is delivered. SagaState is the state of the saga the transaction is a step of
+// (running, done, compensating, compensated or incident), null for a transaction that is not.
 type TxnStatusOutput struct {
 	TxnID       string  `json:"txn_id"`
 	Status      string  `json:"status"`
 	ExternalRef *string `json:"external_ref"`
+	SagaState   *string `json:"saga_state"`
 }
 
 // TxnStatus reports where a transaction of the tenant stands: accepted (queued),
@@ -165,6 +187,9 @@ func TxnStatus(ctx context.Context, st *store.Store, tenantID string, in TxnStat
 	}
 	if t.ExternalRef != "" {
 		out.ExternalRef = &t.ExternalRef
+	}
+	if t.SagaState != "" {
+		out.SagaState = &t.SagaState
 	}
 	return out, nil
 }

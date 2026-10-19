@@ -3,7 +3,8 @@ package x12
 import "fmt"
 
 // Grammar of the supported transaction sets (X12 004010), the subset named in
-// the plan. Source of the layout: https://www.stedi.com/edi/x12-004010/850,
+// the plan. 855 and 856 are the documents the gateway sends (wave 2-7); it never
+// accepts them from a partner, but partner-emulator reads them with this parser. Source of the layout: https://www.stedi.com/edi/x12-004010/850,
 // /810 and /997 (checked 19.10.2026). The subset is smaller than the standard:
 // a segment that is not listed here is rejected as "not in the defined set".
 //
@@ -60,6 +61,26 @@ var grammars = map[string][]node{
 			seg("REF", 0, 12)),
 		seg("TDS", 1, 1), seg("CTT", 0, 1),
 	},
+	// 855 (Purchase Order Acknowledgment): BAK, the PO1 loop with the ACK of each line, CTT.
+	"855": {
+		seg("BAK", 1, 1), seg("CUR", 0, 1), seg("REF", 0, 12), seg("PER", 0, 3), seg("DTM", 0, 10),
+		n1Loop(),
+		loop("PO1", 1, 100000,
+			seg("ACK", 0, 104),
+			seg("REF", 0, 12)),
+		seg("CTT", 1, 1),
+	},
+	// 856 (Ship Notice). The HL hierarchy (shipment, order, pack, item) is checked flat:
+	// every HL starts an instance that may hold the segments below in this order. The
+	// standard nests the loops; a flat grammar cannot follow a tree of unlimited depth, and
+	// the gateway writes one fixed shape (S, O, then P and I for each line).
+	"856": {
+		seg("BSN", 1, 1),
+		loop("HL", 1, 200000,
+			seg("TD1", 0, 20), seg("PRF", 0, 1), seg("REF", 0, 12), seg("DTM", 0, 10),
+			seg("MAN", 0, 10), seg("LIN", 0, 1), seg("SN1", 0, 1), n1Loop()),
+		seg("CTT", 1, 1),
+	},
 	"997": {
 		seg("AK1", 1, 1),
 		loop("AK2", 0, 999999,
@@ -70,7 +91,7 @@ var grammars = map[string][]node{
 }
 
 // groupCode maps a set to the GS01 of its group.
-var groupCode = map[string]string{"850": "PO", "810": "IN", "997": "FA"}
+var groupCode = map[string]string{"850": "PO", "810": "IN", "855": "PR", "856": "SH", "997": "FA"}
 
 // grammarIDs lists every segment ID a grammar mentions.
 func grammarIDs(nodes []node, into map[string]bool) map[string]bool {

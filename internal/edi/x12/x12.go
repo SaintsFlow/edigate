@@ -7,9 +7,10 @@
 //
 // Write turns an Interchange back into bytes. For an interchange that Parse
 // accepted without set errors, Write(Parse(raw)) equals raw byte for byte.
-// Waves 2-7 and later write 855, 856 and 997 with the same code.
+// The gateway writes its 855 and 856 (internal/edi/outbound), and partner-emulator its
+// 997, with the same code.
 //
-// Supported sets: 850, 810 and 997 (see grammar.go). The text is never repaired
+// Supported sets: 850, 810, 855, 856 and 997 (see grammar.go). The text is never repaired
 // or escaped: 004010 has no release character, so a value that holds a separator
 // or a byte outside printable ASCII rejects the set.
 package x12

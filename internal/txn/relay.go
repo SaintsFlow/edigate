@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"math/big"
@@ -27,22 +28,46 @@ const (
 	idlePoll   = 200 * time.Millisecond
 )
 
-// Relay delivers outbox rows to the ERP. Every worker takes one row per
-// transaction (FOR UPDATE SKIP LOCKED), asks the adapter whether the effect is
+// The MDN wait of a document sent to a partner (invariant I6): the same transmission is
+// repeated after 30 minutes, at most three times, then the document is an incident.
+const (
+	mdnWait    = 30 * time.Minute
+	minMDNWait = 10 * time.Second
+	mdnRepeats = 3
+)
+
+// Transmitter sends a document to a partner and returns the MDN it answered with.
+type Transmitter interface {
+	Transmit(ctx context.Context, t adapters.Transmission) (adapters.Receipt, error)
+}
+
+// Relay delivers outbox rows to the ERP, the warehouse and the partner. Every worker takes
+// one row per transaction (FOR UPDATE SKIP LOCKED), asks the adapter whether the effect is
 // already there, applies it if not, and records the result in the same
 // transaction. Whatever dies in between, the row is taken again, and the
 // idempotent receiver (external_id = hex of the key) keeps the effect single.
+// A document for a partner goes to AS2 instead: it is sent as it was stored, again and
+// again with the same bytes until an MDN counts.
 type Relay struct {
 	Store   *store.Store
 	Adapter adapters.Adapter
-	Workers int     // parallel workers; at least 1
-	Scale   float64 // pauses are divided by it (EDIGATE_TIME_SCALE); 0 means 1
+	AS2     Transmitter // nil: rows of documents for partners stay queued
+	Workers int         // parallel workers; at least 1
+	Scale   float64     // pauses are divided by it (EDIGATE_TIME_SCALE); 0 means 1
 	Log     *slog.Logger
 	Chaos   *Chaos // nil: no fault injection
+
+	// MDNRepeatAfter is the pause before a transmission without an MDN is repeated.
+	// Zero means 30 minutes divided by Scale, but not less than 10 seconds.
+	MDNRepeatAfter time.Duration
 
 	// AfterApply is for tests: it runs right after a successful Apply, before the
 	// row is updated. An error from it leaves the row untouched, like a crash there.
 	AfterApply func() error
+
+	// BeforeSend is for tests: it runs before a document is sent to the partner, after its
+	// numbers and bytes were fixed. An error from it leaves the row untouched.
+	BeforeSend func() error
 }
 
 // Run starts the workers and blocks until ctx ends.
@@ -78,12 +103,19 @@ func (r *Relay) work(ctx context.Context) {
 // Step handles one due outbox row. It reports false when there was none. An
 // error means the row stays as it was (the transaction is rolled back).
 func (r *Relay) Step(ctx context.Context) (bool, error) {
-	claim, err := r.Store.ClaimOutbox(ctx)
+	var skip []string
+	if r.AS2 == nil {
+		skip = []string{adapters.EffectSend855, adapters.EffectSend856}
+	}
+	claim, err := r.Store.ClaimOutbox(ctx, skip...)
 	if err != nil || claim == nil {
 		return false, err
 	}
 	defer claim.Release(ctx)
 	r.Chaos.maybeExit(r.Chaos.exitBeforeSend())
+	if adapters.IsSend(claim.Row.EffectType) {
+		return true, r.sendDocument(ctx, claim)
+	}
 
 	e := adapters.Effect{
 		Type: claim.Row.EffectType, TenantID: claim.Row.TenantID,
@@ -108,6 +140,69 @@ func (r *Relay) Step(ctx context.Context) (bool, error) {
 		return true, claim.Ack(ctx, ref)
 	}
 	return true, r.failed(ctx, claim, err)
+}
+
+// sendDocument makes one transmission of a document to the partner and records it. The
+// bytes, the Message-Id and the numbers come from the row, so a repeat is the same
+// transmission (I7). An MDN that names our Message-Id and the SHA-256 of our bytes counts and
+// completes the row; the document is delivered only when the 997 agrees too. Without an
+// MDN the row waits and the transmission is repeated, and after the third repeat the
+// document is an incident. A document that is already an incident (a negative 997 came) is
+// never sent again.
+func (r *Relay) sendDocument(ctx context.Context, claim *store.Claim) error {
+	var t adapters.Transmission
+	if err := json.Unmarshal(claim.Row.Payload, &t); err != nil {
+		return claim.Fail(ctx, "failed", "adapter_rejected", "the transmission is unreadable")
+	}
+	reason, err := claim.DocIncident(ctx, t.DocID)
+	if err != nil {
+		return err
+	}
+	if reason != "" {
+		r.Log.Warn("document not sent: it is an incident", "outbox_id", claim.Row.ID, "reason", reason)
+		return claim.Fail(ctx, "failed", reason, "the document is an incident")
+	}
+	if r.BeforeSend != nil {
+		if err := r.BeforeSend(); err != nil {
+			return err
+		}
+	}
+	receipt, sendErr := r.AS2.Transmit(ctx, t)
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	counted := sendErr == nil && receipt.Counts(t)
+	mdn, err := json.Marshal(receipt)
+	if err != nil {
+		return err
+	}
+	if err := claim.RecordTransmission(ctx, t.DocID, counted, mdn); err != nil {
+		return err
+	}
+	if counted {
+		return claim.Ack(ctx, t.MessageID)
+	}
+	cause := "the MDN does not match the transmission"
+	if sendErr != nil {
+		cause = sendErr.Error()
+	}
+	if claim.Row.Attempts >= mdnRepeats {
+		r.Log.Warn("document gave up: no MDN", "outbox_id", claim.Row.ID)
+		return claim.FailSend(ctx, t.DocID, "no_mdn", cause)
+	}
+	return claim.Retry(ctx, cause, r.mdnPause())
+}
+
+// mdnPause is the wait before a transmission without an MDN is repeated.
+func (r *Relay) mdnPause() time.Duration {
+	if r.MDNRepeatAfter > 0 {
+		return r.MDNRepeatAfter
+	}
+	d := mdnWait
+	if r.Scale > 0 {
+		d = time.Duration(float64(d) / r.Scale)
+	}
+	return max(d, minMDNWait)
 }
 
 // failed decides what a failed delivery becomes: a permanent refusal of the ERP

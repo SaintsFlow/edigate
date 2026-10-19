@@ -62,8 +62,34 @@ var (
 	reCur   = regexp.MustCompile(`^[A-Z]{3}$`)
 )
 
-// fixturesLoad reads and checks the file, then writes it in one transaction.
-func fixturesLoad(ctx context.Context, path string, out io.Writer) error {
+// fixturesLoad is "fixtures load <file> [--partner-tokens-out <file>]". The file may come
+// before or after the flag.
+func fixturesLoad(ctx context.Context, args []string, out io.Writer) error {
+	const form = "fixtures: expected: load <fixtures.json> [--partner-tokens-out <file>]"
+	var path string
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		path, args = args[0], args[1:]
+	}
+	fs := flag.NewFlagSet("fixtures load", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	tokensOut := fs.String("partner-tokens-out", "", "")
+	if err := fs.Parse(args); err != nil {
+		return usageError{form}
+	}
+	if path == "" && fs.NArg() == 1 {
+		path = fs.Arg(0)
+	} else if fs.NArg() != 0 || path == "" {
+		return usageError{form}
+	}
+	return loadFixtures(ctx, path, *tokensOut, out)
+}
+
+// loadFixtures reads and checks the file, then writes it in one transaction. With
+// tokensOut set it then gives a token to every customer partner of the file that has none
+// and writes them to that file as JSON {"<partner id>": "<token>"}: partner-emulator reads
+// it to post its 997. A token that was issued before cannot be read back (only its hash is
+// stored), so the entries already in the file are kept.
+func loadFixtures(ctx context.Context, path, tokensOut string, out io.Writer) error {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return err
@@ -81,8 +107,46 @@ func fixturesLoad(ctx context.Context, path string, out io.Writer) error {
 			return fmt.Errorf("load fixtures: %w", err)
 		}
 		fmt.Fprintf(out, "fixtures loaded: tenant %s, %d partners, %d prices\n", fx.TenantID, len(fx.Partners), len(fx.Prices))
-		return nil
+		if tokensOut == "" {
+			return nil
+		}
+		return writePartnerTokens(ctx, st, fx, tokensOut, out)
 	})
+}
+
+// writePartnerTokens issues a token to each customer partner of the fixtures that has no
+// active one and adds it to the JSON file.
+func writePartnerTokens(ctx context.Context, st *store.Store, fx store.Fixtures, path string, out io.Writer) error {
+	tokens := map[string]string{}
+	if raw, err := os.ReadFile(path); err == nil {
+		if err := json.Unmarshal(raw, &tokens); err != nil {
+			return fmt.Errorf("the tokens file %s is not a JSON object: %w", path, err)
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	var ids []string
+	for _, p := range fx.Partners {
+		if p.Role == "customer" {
+			ids = append(ids, p.PartnerID)
+		}
+	}
+	fresh, err := st.IssueMissingPartnerTokens(ctx, fx.TenantID, ids)
+	if err != nil {
+		return fmt.Errorf("issue partner tokens: %w", err)
+	}
+	for id, token := range fresh {
+		tokens[id] = token
+	}
+	raw, err := json.MarshalIndent(tokens, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(path, append(raw, '\n'), 0o644); err != nil { // the emulator runs as another user in its container
+		return err
+	}
+	fmt.Fprintf(out, "partner tokens: %d issued, %d in %s\n", len(fresh), len(tokens), path)
+	return nil
 }
 
 func (f fixturesFile) toStore() (store.Fixtures, error) {

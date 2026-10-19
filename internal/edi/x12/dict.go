@@ -161,6 +161,48 @@ var dict = map[string][]elemDef{
 	// https://www.stedi.com/edi/x12-004010/segment/TDS
 	"TDS": {el("610", mand, tN2, 1, 15), el("610", opt, tN2, 1, 15), el("610", opt, tN2, 1, 15), el("610", opt, tN2, 1, 15)},
 
+	// https://www.stedi.com/edi/x12-004010/segment/BAK
+	"BAK": {
+		el("353", mand, tID, 2, 2), el("587", mand, tID, 2, 2), el("324", mand, tAN, 1, 22), el("373", mand, tDT, 8, 8),
+		el("328", opt, tAN, 1, 30), el("326", opt, tAN, 1, 45), el("367", opt, tAN, 1, 30), el("127", opt, tAN, 1, 30),
+		el("373", opt, tDT, 8, 8), el("640", opt, tID, 2, 2),
+	},
+	// https://www.stedi.com/edi/x12-004010/segment/ACK (only ACK01 to ACK08 are supported; the further product ids make "too many data elements")
+	"ACK": {
+		el("668", mand, tID, 2, 2), el("380", cond, tR, 1, 15), el("355", cond, tID, 2, 2), el("374", opt, tID, 3, 3),
+		el("373", cond, tDT, 8, 8), el("326", opt, tAN, 1, 45), el("235", cond, tID, 2, 2), el("234", cond, tAN, 1, 48),
+	},
+	// https://www.stedi.com/edi/x12-004010/segment/BSN
+	"BSN": {
+		el("353", mand, tID, 2, 2), el("396", mand, tAN, 2, 30), el("373", mand, tDT, 8, 8), el("337", mand, tTM, 4, 8),
+		el("1005", opt, tID, 4, 4), el("640", cond, tID, 2, 2), el("641", opt, tID, 3, 3),
+	},
+	// https://www.stedi.com/edi/x12-004010/segment/HL
+	"HL": {el("628", mand, tAN, 1, 12), el("734", opt, tAN, 1, 12), el("735", mand, tID, 1, 2), el("736", opt, tID, 1, 1)},
+	// https://www.stedi.com/edi/x12-004010/segment/TD1
+	"TD1": {
+		el("103", opt, tAN, 3, 5), el("80", cond, tN0, 1, 7), el("23", opt, tID, 1, 1), el("22", cond, tAN, 1, 30),
+		el("79", opt, tAN, 1, 50), el("187", opt, tID, 1, 2), el("81", cond, tR, 1, 10), el("355", cond, tID, 2, 2),
+		el("183", cond, tR, 1, 8), el("355", cond, tID, 2, 2),
+	},
+	// https://www.stedi.com/edi/x12-004010/segment/MAN
+	"MAN": {
+		el("88", mand, tID, 1, 2), el("87", mand, tAN, 1, 48), el("87", opt, tAN, 1, 48), el("88", cond, tID, 1, 2),
+		el("87", cond, tAN, 1, 48), el("87", opt, tAN, 1, 48),
+	},
+	// https://www.stedi.com/edi/x12-004010/segment/SN1
+	"SN1": {
+		el("350", opt, tAN, 1, 20), el("382", mand, tR, 1, 10), el("355", mand, tID, 2, 2), el("646", opt, tR, 1, 15),
+		el("330", cond, tR, 1, 15), el("355", cond, tID, 2, 2), el("728", opt, tID, 1, 2), el("668", opt, tID, 2, 2),
+	},
+	// https://www.stedi.com/edi/x12-004010/segment/PRF
+	"PRF": {
+		el("324", mand, tAN, 1, 22), el("328", opt, tAN, 1, 30), el("327", opt, tAN, 1, 8), el("373", opt, tDT, 8, 8),
+		el("350", opt, tAN, 1, 20), el("367", opt, tAN, 1, 30), el("92", opt, tID, 2, 2),
+	},
+	// https://www.stedi.com/edi/x12-004010/segment/LIN (only LIN01 to LIN07 are supported)
+	"LIN": repeat([]elemDef{el("350", opt, tAN, 1, 20)}, 3, el("235", cond, tID, 2, 2), el("234", cond, tAN, 1, 48)),
+
 	// https://www.stedi.com/edi/x12-004010/segment/AK1
 	"AK1": {el("479", mand, tID, 2, 2), el("28", mand, tN0, 1, 9)},
 	// https://www.stedi.com/edi/x12-004010/segment/AK2

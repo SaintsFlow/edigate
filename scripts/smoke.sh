@@ -15,7 +15,11 @@
 # idempotency key or price of the 850. Wave 2-6 adds: an order above the limit waits as
 # pending_approval, one operator approves it with edigatectl and it completes (y); an unknown
 # ship-to gives policy_denied with ship_to.unknown (f2); a supplier invoice needs two different
-# operators and reaches mock-1c once (x).
+# operators and reaches mock-1c once (x). Wave 2-7 adds scenario S2 (s2): order -> 855 ->
+# reservation -> shipment -> 856 through partner-emulator, both documents delivered (MDN and
+# a positive 997) and both sagas done, one 855 and one 856 at the partner with different ISA13
+# (c); then a negative 997 (PARTNER_ACK_STATUS=R through /control) for a new order: the saga is an
+# incident and no second 855 with a new ISA13 goes out (ch).
 # Exits 0 only if every check matches. Safe to run again: principal ids carry a
 # random suffix, ISA13 comes from the clock, and the EDI rows of the tenant
 # "smoke" (stand data only) are cleared at the start so that step a still sees
@@ -100,7 +104,12 @@ send() {
 
 CALL_BODY='{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"edi.list_inbox","arguments":{}}}'
 
-sql "DELETE FROM approvals WHERE tenant_id = 'smoke'" "DELETE FROM daily_auto_totals WHERE tenant_id = 'smoke'" \
+sql "DELETE FROM outbound_docs WHERE tenant_id = 'smoke'" \
+	"DELETE FROM saga_steps WHERE saga_id IN (SELECT id FROM sagas WHERE tenant_id = 'smoke')" "DELETE FROM sagas WHERE tenant_id = 'smoke'" \
+	"DELETE FROM control_numbers WHERE tenant_id = 'smoke'" \
+	"DELETE FROM mock_wms.reservations WHERE tenant_id = 'smoke'" "DELETE FROM mock_wms.shipments WHERE tenant_id = 'smoke'" \
+	"DELETE FROM mock_partner.received WHERE tenant_id = '$GATEWAY'" \
+	"DELETE FROM approvals WHERE tenant_id = 'smoke'" "DELETE FROM daily_auto_totals WHERE tenant_id = 'smoke'" \
 	"DELETE FROM outbox WHERE tenant_id = 'smoke'" "DELETE FROM idempotency_keys WHERE tenant_id = 'smoke'" \
 	"DELETE FROM mock_onec.sales_orders WHERE tenant_id = 'smoke'" "DELETE FROM mock_onec.vendor_invoices WHERE tenant_id = 'smoke'" \
 	"DELETE FROM quarantine_calls WHERE tenant_id = 'smoke'" "DELETE FROM edi_notes WHERE tenant_id = 'smoke'" \
@@ -116,6 +125,10 @@ OPERATOR_TOKEN=$("$BIN/edigatectl" token issue --tenant smoke --kind operator --
 PARTNER_TOKEN=$("$BIN/edigatectl" token issue --tenant smoke --kind partner --id "$PARTNER_ID" --partner "$BUYER")
 OPERATOR2_TOKEN=$("$BIN/edigatectl" token issue --tenant smoke --kind operator --id "$OPERATOR2_ID")
 SUPPLIER_TOKEN=$("$BIN/edigatectl" token issue --tenant smoke --kind partner --id "$SUPPLIER_ID" --partner "$VENDOR")
+# partner-emulator posts its 997 with the token of the buyer; it reads the file at every send.
+STAND_TOKENS=deploy/compose/stand/partner_tokens.json
+printf '{"%s":"%s"}\n' "$BUYER" "$PARTNER_TOKEN" >"$STAND_TOKENS"
+chmod 644 "$STAND_TOKENS"
 
 # (a) the agent gets an empty inbox
 out=$("$BIN/edigatectl" call --url "$URL" --token "$AGENT_TOKEN" edi.list_inbox '{}')
@@ -418,6 +431,111 @@ wait_status "$INV_TXN" completed
 row=$(sql "SELECT invoice_number || '|' || order_ref || '|' || total::text FROM mock_onec.vendor_invoices WHERE tenant_id = 'smoke'")
 [ "$row" = "$INV_NO|SPO-SMK-1|30.00" ] || fail "x: invoice in mock-1c (number|order|total): $row"
 echo "ok: x invoice approved by two operators, one invoice in mock-1c"
+
+# --- wave 2-7: scenario S2, the order through to the 856, with MDN and 997 ---
+PARTNER_URL=http://127.0.0.1:18083
+curl -fsS -X POST "$PARTNER_URL/control" -d '{"ack_status":"A","ack_delay_ms":0,"mdn_delay_ms":0,"mdn_drop":0}' >/dev/null ||
+	fail "s2: partner-emulator does not answer on $PARTNER_URL"
+
+# wait_sql <label> <query> <expected>: waits up to 40 s for the query to give the value.
+wait_sql() {
+	waited=0
+	while :; do
+		got=$(sql "$2")
+		[ "$got" = "$3" ] && return 0
+		waited=$((waited + 1))
+		[ "$waited" -le 80 ] || fail "$1: expected '$3', got '$got'"
+		sleep 0.5
+	done
+}
+
+# receive_order <ISA13 offset> <order number>: the partner sends an 850 (10 pieces, 75.00 by the
+# price list); S2_DOC is the id of the stored document.
+receive_order() {
+	sleep 1
+	isa=$(printf '%09d' $((($(date +%s) + $1) % 1000000000)))
+	edi850 "$TMP/s2-$2.edi" "$isa" "$2"
+	out=$(send "$TMP/s2-$2.edi") || fail "s2: send failed: $out"
+	S2_DOC=$(sql "SELECT id FROM edi_documents WHERE tenant_id = 'smoke' AND bk_ref = '$2'")
+	[ -n "$S2_DOC" ] || fail "s2: the order $2 was not stored"
+}
+
+# approve_if_pending <answer of a tool>: a document that the forecast sends to an operator is approved.
+approve_if_pending() {
+	case "$1" in
+	*'"status":"pending_approval"'*)
+		id=$(printf '%s' "$1" | sed -n 's/.*"approval_id":"\([^"]*\)".*/\1/p')
+		"$BIN/edigatectl" approvals approve --url "$OPS_URL" --token "$OPERATOR_TOKEN" "$id" >/dev/null || fail "s2: approve failed"
+		;;
+	esac
+}
+
+# order_of <order number>: creates the order in the ERP and waits for it; S2_TXN is its txn_id.
+order_of() {
+	made=$(call_agent erp.create_sales_order "{\"source_document_id\":\"$S2_DOC\"}") || fail "s2: erp.create_sales_order failed: $made"
+	S2_TXN=$(printf '%s' "$made" | sed -n 's/.*"txn_id":"\([^"]*\)".*/\1/p')
+	[ -n "$S2_TXN" ] || fail "s2: no txn_id in: $made"
+	wait_status "$S2_TXN" completed
+}
+
+DOC_STATE="SELECT string_agg(d.state || '|' || d.mdn_ok || '|' || COALESCE(d.ack_status, '-'), ',' ORDER BY d.st01)
+	FROM outbound_docs d JOIN sagas g ON g.id = d.saga_id WHERE g.tenant_id = 'smoke' AND g.business_key->>1"
+
+# (c) 850 -> order -> 855 AC -> reservation -> shipment -> 856; both sagas done
+S2_REF="SMKS2$(date +%s)"
+receive_order 17 "$S2_REF"
+order_of
+ans=$(call_agent erp.confirm_order "{\"sales_order_txn_id\":\"$S2_TXN\",\"ack_type\":\"AC\"}") || fail "s2: erp.confirm_order failed: $ans"
+approve_if_pending "$ans"
+wait_sql "s2: the 855 is delivered" "$DOC_STATE = '$S2_REF' AND d.st01 = '855'" "delivered|true|A"
+wait_sql "s2: the order saga is done" "SELECT state FROM sagas WHERE tenant_id = 'smoke' AND kind = 'order' AND business_key->>1 = '$S2_REF'" done
+wait_status "$S2_TXN" completed
+case "$(call_agent txn.status "{\"txn_id\":\"$S2_TXN\"}")" in
+*'"saga_state":"done"'*) echo "ok: s2 txn.status shows saga_state done" ;;
+*) fail "s2: txn.status of the order does not show saga_state done" ;;
+esac
+ans=$(call_agent wms.reserve "{\"sales_order_txn_id\":\"$S2_TXN\"}") || fail "s2: wms.reserve failed: $ans"
+RESERVE_TXN=$(printf '%s' "$ans" | sed -n 's/.*"txn_id":"\([^"]*\)".*/\1/p')
+wait_status "$RESERVE_TXN" completed
+ans=$(call_agent edi.send_asn "{\"sales_order_txn_id\":\"$S2_TXN\"}") || fail "s2: edi.send_asn failed: $ans"
+approve_if_pending "$ans"
+wait_sql "s2: the 856 is delivered" "$DOC_STATE = '$S2_REF' AND d.st01 = '856'" "delivered|true|A"
+wait_sql "s2: both sagas are done" "SELECT string_agg(state, ',' ORDER BY kind) FROM sagas WHERE tenant_id = 'smoke' AND business_key->>1 = '$S2_REF'" "done,done"
+got=$(sql "SELECT string_agg(st01 || ':' || n || ':' || ni, ',' ORDER BY st01) FROM
+	(SELECT st01, count(*) AS n, count(DISTINCT isa13) AS ni FROM mock_partner.received WHERE business_ref = '$S2_REF' GROUP BY st01) t")
+[ "$got" = "855:1:1,856:1:1" ] || fail "s2: transmissions and interchanges at the partner (set:count:different ISA13): $got"
+n=$(sql "SELECT count(DISTINCT isa13) FROM mock_partner.received WHERE business_ref = '$S2_REF'")
+[ "$n" = 2 ] || fail "s2: the 855 and the 856 must have different ISA13, got $n"
+n=$(sql "SELECT count(*) FROM mock_wms.shipments WHERE tenant_id = 'smoke' AND order_ref = '$S2_REF' AND cardinality(sscc) = 1 AND length(sscc[1]) = 18")
+[ "$n" = 1 ] || fail "s2: expected one shipment with an SSCC of 18 digits, got $n"
+n=$(sql "SELECT count(*) FROM mock_partner.received r JOIN mock_wms.shipments s ON s.order_ref = r.business_ref
+	WHERE r.st01 = '856' AND r.business_ref = '$S2_REF' AND position('MAN*GM*' || s.sscc[1] || '~' in convert_from(r.body, 'UTF8')) > 0")
+[ "$n" = 1 ] || fail "s2: the 856 does not carry the SSCC of the warehouse"
+echo "ok: s2 (c) order, 855, reservation, shipment, 856: delivered with MDN and 997, both sagas done"
+
+# (ch) a negative 997 for the next order: the saga is an incident and the 855 is not sent again
+curl -fsS -X POST "$PARTNER_URL/control" -d '{"ack_status":"R"}' >/dev/null || fail "s2: control failed"
+S2R_REF="SMKS2R$(date +%s)"
+receive_order 19 "$S2R_REF"
+order_of
+ans=$(call_agent erp.confirm_order "{\"sales_order_txn_id\":\"$S2_TXN\",\"ack_type\":\"AC\"}") || fail "s2: erp.confirm_order failed: $ans"
+approve_if_pending "$ans"
+wait_sql "s2: the order saga is an incident" "SELECT state FROM sagas WHERE tenant_id = 'smoke' AND kind = 'order' AND business_key->>1 = '$S2R_REF'" incident
+curl -fsS -X POST "$PARTNER_URL/control" -d '{"ack_status":"A"}' >/dev/null || fail "s2: control failed"
+sleep 3
+got=$(sql "SELECT count(*) || ':' || count(DISTINCT isa13) FROM mock_partner.received WHERE business_ref = '$S2R_REF'")
+[ "$got" = "1:1" ] || fail "s2: after a negative 997 the partner got (transmissions:different ISA13) $got, want 1:1"
+got=$(sql "$DOC_STATE = '$S2R_REF'")
+[ "$got" = "sent|true|R" ] || [ "$got" = "incident|true|R" ] || fail "s2: document after a negative 997: $got"
+got=$(sql "SELECT incident_reason FROM outbound_docs d JOIN sagas g ON g.id = d.saga_id WHERE g.business_key->>1 = '$S2R_REF'")
+[ "$got" = ack_rejected ] || fail "s2: incident reason: $got"
+n=$(sql "SELECT count(*) FROM approvals WHERE tenant_id = 'smoke' AND kind = 'review' AND rules::text = '[\"ack.rejected\"]'")
+[ "$n" = 1 ] || fail "s2: expected one review request ack.rejected, got $n"
+case "$(call_agent txn.status "{\"txn_id\":\"$S2_TXN\"}")" in
+*'"saga_state":"incident"'*) ;;
+*) fail "s2: txn.status does not show saga_state incident" ;;
+esac
+echo "ok: s2 (ch) a negative 997: incident, a review request, no second 855"
 
 # (o) the gateway log holds none of the partner's text
 logs=$($COMPOSE logs --no-color edigate)

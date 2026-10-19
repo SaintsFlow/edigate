@@ -15,6 +15,8 @@ type AuditEvent struct {
 	Outcome       string
 	Detail        []byte // JSON
 	PolicyExplain []byte // JSON: the decision of the policy, its deny and fired rules
+
+	ControlNumbers []byte // JSON: ISA13, GS06 and ST02 of an outgoing document
 }
 
 // AppendAudit adds a row to audit_log. The table rejects UPDATE and DELETE.
@@ -26,8 +28,8 @@ func (s *Store) AppendAudit(ctx context.Context, e AuditEvent) error {
 // event that belongs to a change commits or rolls back with it.
 func appendAudit(ctx context.Context, db execer, e AuditEvent) error {
 	_, err := db.Exec(ctx,
-		`INSERT INTO audit_log (tenant_id, event_type, trace_id, principal_id, tool, idem_key, payload_sha256, outcome, detail, policy_explain)
-		 VALUES ($1, $2, $3, $4, NULLIF($5, ''), $6, $7, NULLIF($8, ''), $9, $10)`,
-		e.TenantID, e.EventType, e.TraceID, e.PrincipalID, e.Tool, e.IdemKey, e.PayloadSHA256, e.Outcome, e.Detail, e.PolicyExplain)
+		`INSERT INTO audit_log (tenant_id, event_type, trace_id, principal_id, tool, idem_key, payload_sha256, outcome, detail, policy_explain, control_numbers)
+		 VALUES ($1, $2, $3, $4, NULLIF($5, ''), $6, $7, NULLIF($8, ''), $9, $10, $11)`,
+		e.TenantID, e.EventType, e.TraceID, e.PrincipalID, e.Tool, e.IdemKey, e.PayloadSHA256, e.Outcome, e.Detail, e.PolicyExplain, e.ControlNumbers)
 	return err
 }

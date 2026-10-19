@@ -83,6 +83,7 @@ type InboundInterchange struct {
 	SHA256    []byte // of Raw; also stored as the MIC
 	MDN       []byte // JSON of the MDN sent for a new interchange
 	Documents []InboundDocument
+	Acks      []InboundAck // the verdicts of the 997 sets of the interchange, matched in the same transaction
 }
 
 // Outcomes of SaveInbound.
@@ -165,6 +166,9 @@ func (s *Store) SaveInbound(ctx context.Context, in InboundInterchange) (SaveRes
 				return SaveResult{}, fmt.Errorf("store note: %w", err)
 			}
 		}
+	}
+	if err := matchAcks(ctx, tx, in.TenantID, in.PartnerID, in.Acks); err != nil {
+		return SaveResult{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return SaveResult{}, err

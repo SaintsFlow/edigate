@@ -2,7 +2,8 @@
 //
 // Settings from the environment: MOCK_DB_URL (required; the mock writes only to
 // its schema mock_onec), MOCK_LISTEN (default 127.0.0.1:8081), and the fault knobs
-// MOCK_FAIL_AFTER_COMMIT_RATE (0 to 1), MOCK_LATENCY_MS, MOCK_REJECT_REF_PREFIX.
+// MOCK_FAIL_AFTER_COMMIT_RATE (0 to 1), MOCK_LATENCY_MS, MOCK_REJECT_REF_PREFIX, and
+// MOCK_FAIL_CANCEL=1 (every cancel of an order answers 500).
 //
 // "mock-onec healthcheck" calls /healthz on the local port and exits 0 or 1 (the
 // container image has no curl).
@@ -45,7 +46,7 @@ func run() error {
 	if listen == "" {
 		listen = "127.0.0.1:8081"
 	}
-	cfg := server.Config{RejectRefPrefix: os.Getenv("MOCK_REJECT_REF_PREFIX")}
+	cfg := server.Config{RejectRefPrefix: os.Getenv("MOCK_REJECT_REF_PREFIX"), FailCancel: os.Getenv("MOCK_FAIL_CANCEL") == "1"}
 	if v := os.Getenv("MOCK_FAIL_AFTER_COMMIT_RATE"); v != "" {
 		rate, err := strconv.ParseFloat(v, 64)
 		if err != nil || rate < 0 || rate > 1 {

@@ -41,14 +41,15 @@ import (
 var gateways = map[string]string{"ta": "ZZ:ZZTESTSUPPL", "tb": "ZZ:ZZTESTSUPPB"}
 
 type rig struct {
-	t     *testing.T
-	st    *store.Store
-	pool  *pgxpool.Pool
-	url   string // the gateway
-	mock  *onecserver.Server
-	relay *txn.Relay
-	rec   *recorder // sits in front of the policy and keeps what it was asked
-	seq   atomic.Int64
+	t       *testing.T
+	st      *store.Store
+	pool    *pgxpool.Pool
+	url     string // the gateway
+	mock    *onecserver.Server
+	mockURL string // mock-1c
+	relay   *txn.Relay
+	rec     *recorder // sits in front of the policy and keeps what it was asked
+	seq     atomic.Int64
 }
 
 // recorder is a Decider that remembers every call and passes it to the real policy.
@@ -82,6 +83,7 @@ func newRig(t *testing.T) *rig {
 	r.mock = onecserver.New(pool, onecserver.Config{})
 	mockTS := httptest.NewServer(r.mock.Handler())
 	t.Cleanup(mockTS.Close)
+	r.mockURL = mockTS.URL
 
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	gate := edge.NewGate(ctx, st, log)

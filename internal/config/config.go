@@ -30,6 +30,11 @@ type Config struct {
 	RelayWorkers int     `yaml:"relay_workers"`
 	TimeScale    float64 `yaml:"time_scale"`
 
+	// The warehouse and the trading partner the sagas deliver to. An empty WMSURL leaves the
+	// warehouse effects queued; an empty PartnerURL leaves the documents for the partner queued.
+	WMSURL     string `yaml:"wms_url"`
+	PartnerURL string `yaml:"partner_url"`
+
 	// Fault injection for tests of the guarantee only (see .env.example). Off by
 	// default; read from the environment only.
 	ChaosExitBeforeSend float64       `yaml:"-"`
@@ -73,6 +78,12 @@ func Load(path string) (Config, error) {
 	}
 	if v := os.Getenv("EDIGATE_ONEC_URL"); v != "" {
 		c.OnecURL = v
+	}
+	if v := os.Getenv("EDIGATE_WMS_URL"); v != "" {
+		c.WMSURL = v
+	}
+	if v := os.Getenv("EDIGATE_PARTNER_URL"); v != "" {
+		c.PartnerURL = v
 	}
 	if c.Listen == "" {
 		c.Listen = defaultListen

@@ -62,13 +62,17 @@ func TestValidateTxnStatus(t *testing.T) {
 			t.Errorf("%s: want ErrInvalid, got %v", bad, err)
 		}
 	}
-	if err := ValidateOutput("txn.status", []byte(`{"txn_id":"x","status":"completed","external_ref":"7"}`)); err != nil {
+	// saga_state arrived in wave 2-7: a state of a saga, or null for a transaction that is not a step.
+	if err := ValidateOutput("txn.status", []byte(`{"txn_id":"x","status":"completed","external_ref":"7","saga_state":"running"}`)); err != nil {
 		t.Error(err)
 	}
-	if err := ValidateOutput("txn.status", []byte(`{"txn_id":"x","status":"accepted","external_ref":null}`)); err != nil {
+	if err := ValidateOutput("txn.status", []byte(`{"txn_id":"x","status":"accepted","external_ref":null,"saga_state":null}`)); err != nil {
 		t.Error(err)
 	}
-	if err := ValidateOutput("txn.status", []byte(`{"txn_id":"x","status":"accepted","external_ref":null,"key":"ab"}`)); err == nil {
+	if err := ValidateOutput("txn.status", []byte(`{"txn_id":"x","status":"accepted","external_ref":null,"saga_state":"lost"}`)); err == nil {
+		t.Error("an unknown saga state must be refused")
+	}
+	if err := ValidateOutput("txn.status", []byte(`{"txn_id":"x","status":"accepted","external_ref":null,"saga_state":null,"key":"ab"}`)); err == nil {
 		t.Error("an extra field must be refused")
 	}
 }

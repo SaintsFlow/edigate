@@ -243,9 +243,7 @@ func (s *Store) DecideApproval(ctx context.Context, tenantID, operatorID, traceI
 	if a.kind == "effect" {
 		switch status {
 		case "approved":
-			if _, err := tx.Exec(ctx,
-				`INSERT INTO outbox (tenant_id, idem_key, effect_type, payload, status) VALUES ($1, $2, $3, $4, 'pending')`,
-				tenantID, a.key, a.effectType, a.args); err != nil {
+			if err := s.enqueue(ctx, tx, tenantID, a.key, a.effectType, a.args); err != nil {
 				return Decision{}, fmt.Errorf("enqueue the approved effect: %w", err)
 			}
 			if _, err := tx.Exec(ctx,

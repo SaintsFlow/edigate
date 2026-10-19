@@ -1,7 +1,8 @@
 // Command edigate runs the gateway: config -> database pool -> migrations ->
 // edge + MCP server, the partner entrance and the operator entrance -> HTTP
-// server (/mcp, /edi/inbound, /ops/, /healthz), and the relay that delivers the
-// outbox to the ERP. It stops gracefully on SIGINT or SIGTERM.
+// server (/mcp, /edi/inbound, /ops/, /healthz), the relay that delivers the outbox
+// (to the ERP, the warehouse and, as AS2 transmissions, to the partner) and the saga
+// runner. It stops gracefully on SIGINT or SIGTERM.
 //
 // "edigate healthcheck" is the container healthcheck (the distroless image has
 // no curl): it calls /healthz on the local listen port and exits 0 or 1.
@@ -33,6 +34,7 @@ import (
 	"github.com/SaintsFlow/edigate/internal/quarantine"
 	"github.com/SaintsFlow/edigate/internal/store"
 	"github.com/SaintsFlow/edigate/internal/txn"
+	"github.com/SaintsFlow/edigate/internal/txn/saga"
 )
 
 func main() {
@@ -88,11 +90,26 @@ func run() error {
 	chaos := txn.NewChaos(cfg.ChaosExitBeforeSend, cfg.ChaosExitAfterApply, cfg.ChaosCrashAfter, cfg.ChaosSeed)
 	chaos.Start()
 	if cfg.OnecURL != "" {
+		effects := adapters.Mux{Onec: adapters.NewOnec(cfg.OnecURL)}
+		var facts saga.Facts // nil without a warehouse: shipment sagas then wait
+		if cfg.WMSURL != "" {
+			wms := adapters.NewWMS(cfg.WMSURL)
+			effects.WMS, facts = wms, wms
+		} else {
+			log.Warn("EDIGATE_WMS_URL is not set: reservations and shipments stay queued")
+		}
+		runner := &saga.Runner{Store: st, Adapter: effects, Facts: facts, Policy: engine, Scale: cfg.TimeScale, Log: log}
 		relay := &txn.Relay{
-			Store: st, Adapter: adapters.NewOnec(cfg.OnecURL), Workers: cfg.RelayWorkers,
+			Store: st, Adapter: effects, Workers: cfg.RelayWorkers,
 			Scale: cfg.TimeScale, Log: log, Chaos: chaos,
 		}
+		if cfg.PartnerURL != "" {
+			relay.AS2 = adapters.NewAS2(cfg.PartnerURL)
+		} else {
+			log.Warn("EDIGATE_PARTNER_URL is not set: documents for partners stay queued")
+		}
 		go relay.Run(ctx)
+		go runner.Run(ctx)
 	} else {
 		log.Warn("EDIGATE_ONEC_URL is not set: the relay is off and orders stay queued")
 	}

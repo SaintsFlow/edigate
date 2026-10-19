@@ -36,6 +36,56 @@ services:
       timeout: 3s
       retries: 30
 
+  # mock-wms: the stand's stand-in for the warehouse system (reservations and shipments with
+  # SSCC). It writes only to the schema mock_wms. Knobs: MOCK_FAIL_AFTER_COMMIT_RATE,
+  # MOCK_LATENCY_MS, MOCK_REJECT_REF_PREFIX (shipments), MOCK_SHIP_QTY_FACTOR.
+  mock-wms:
+    build:
+      context: ../..
+    image: edigate-stand:local
+    entrypoint: ["/mock-wms"]
+    environment:
+      MOCK_DB_URL: postgres://edigate:edigate@postgres:5432/edigate?sslmode=disable
+      MOCK_LISTEN: 0.0.0.0:8082
+    ports:
+      - "127.0.0.1:18082:8082"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "/mock-wms", "healthcheck"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  # partner-emulator: the stand's trading partner. It takes the 855 and 856 of the gateway,
+  # answers with an MDN and posts a 997 back. It reads the token of the partner from
+  # stand/partner_tokens.json (scripts/smoke.sh and `edigatectl fixtures load
+  # --partner-tokens-out` write it). Knobs: PARTNER_ACK_DELAY_MS, PARTNER_ACK_STATUS,
+  # PARTNER_MDN_DELAY_MS, PARTNER_MDN_DROP, and POST /control at run time.
+  partner-emulator:
+    build:
+      context: ../..
+    image: edigate-stand:local
+    entrypoint: ["/partner-emulator"]
+    environment:
+      PARTNER_DB_URL: postgres://edigate:edigate@postgres:5432/edigate?sslmode=disable
+      PARTNER_LISTEN: 0.0.0.0:8083
+      GATEWAY_URL: http://edigate:8080
+      PARTNER_TOKENS_FILE: /stand/partner_tokens.json
+    volumes:
+      - ./stand:/stand:ro
+    ports:
+      - "127.0.0.1:18083:8083"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "/partner-emulator", "healthcheck"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
   edigate:
     build:
       context: ../..
@@ -48,6 +98,9 @@ services:
       EDIGATE_QUARANTINE_MODEL: llama3.2:3b
       # The ERP the relay delivers orders to.
       EDIGATE_ONEC_URL: http://mock-onec:8081
+      # The warehouse and the trading partner the sagas deliver to.
+      EDIGATE_WMS_URL: http://mock-wms:8082
+      EDIGATE_PARTNER_URL: http://partner-emulator:8083
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:

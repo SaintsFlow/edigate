@@ -359,6 +359,7 @@ func TestT_POL_06_NoDeleteOrMasterDataTools(t *testing.T) {
 	allowed := map[string]bool{
 		"edi.list_inbox": true, "edi.read_document": true, "edi.extract_note": true,
 		"erp.create_sales_order": true, "erp.post_vendor_invoice": true, "txn.status": true,
+		"erp.confirm_order": true, "wms.reserve": true, "edi.send_asn": true, // wave 2-7
 	}
 	raw, err := policies.FS.ReadFile("data.json")
 	r.must(err)

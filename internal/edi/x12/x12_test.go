@@ -451,9 +451,9 @@ func TestGrammarMissingAndUnplacedPositions(t *testing.T) {
 }
 
 func TestSetLevelFaults(t *testing.T) {
-	s := onlySet(t, wrap(t, "PO", "856", order850))
+	s := onlySet(t, wrap(t, "PO", "820", order850)) // 856 is supported since wave 2-7
 	if len(s.Errors) == 0 || s.Errors[0].AK502 != SetNotSupported {
-		t.Fatalf("856: %+v", s.Errors)
+		t.Fatalf("820: %+v", s.Errors)
 	}
 	s = onlySet(t, wrap(t, "IN", "850", order850))
 	if len(s.Errors) != 1 || s.Errors[0].AK502 != SetInvalidID {

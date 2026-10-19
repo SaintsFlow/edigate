@@ -28,13 +28,21 @@ Status: work in progress, v0.1 is not released.
   an operator decides. A supplier invoice, `erp.post_vendor_invoice`, always needs two different operators. The
   operator sees typed values and rule names, never the text of a note, over `/ops/` or with
   `edigatectl approvals list|approve|reject`. A request that nobody decides in 30 minutes expires.
-- Not yet: sagas, outgoing documents (855, 856), the other tools of risk level 2 (`erp.confirm_order`,
-  `edi.send_asn`, `notify.send_email`; their rules are written and tested, the tools are not) and the 997 and MDN
-  receipts. The design is in [docs](docs).
+- Also works now: an order goes through from end to end. `erp.confirm_order` sends the 855 to the partner,
+  `wms.reserve` reserves the lines in the warehouse (mock-wms), and `edi.send_asn` ships them and sends the 856 with the
+  SSCC the warehouse gave. The agent passes only the `txn_id` of the order; the documents are built from the order and
+  from the facts of the warehouse. The steps run as sagas: a failure before the send cancels the order or releases
+  the reservation, and a failure after the send is an incident for an operator, never a second send with new
+  numbers. ISA13, GS06 and ST02 are given out in the same transaction as the outbox row and stay the same when a
+  transmission is repeated. A document counts as delivered only when an MDN and a 997 with AK5 `A` or `E` both came
+  back; `txn.status` shows `saga_state`. The partner on the stand is partner-emulator, which answers with an MDN and a
+  997 you can set to accepted, rejected, mixed, late or missing.
+- Not yet: `notify.send_email` (its rules are written and tested, the tool is not) and the tools of the upstream
+  gateway. The design is in [docs](docs).
 
 ## Try it
 
-You need Go 1.27, Docker, `curl`, and free local ports 55432, 18080 and 18081.
+You need Go 1.27, Docker, `curl`, and free local ports 55432, 18080, 18081, 18082 and 18083.
 
 ```sh
 make smoke
@@ -58,6 +66,16 @@ an order and then answers 500. It sends 50 purchase orders, creates an order for
 error, and keeps repeating until Docker has restarted the gateway at least 100 times. It exits with code 0 only if
 mock-1c holds exactly 50 orders, one per document, and each document got one `txn_id` in the whole run. It takes
 several minutes and puts the normal stand back at the end.
+
+The smoke test then runs a whole order: the partner sends an 850, the agent creates the order, confirms it with an
+855, reserves it and ships it, and the test waits until both sagas are `done` and partner-emulator holds one 855 and
+one 856 with different ISA13. After that it sets partner-emulator to answer with a negative 997 for the next order
+and checks that the saga is an incident and the 855 is not sent again. The stand has five services: PostgreSQL, the
+gateway and the three mocks (mock-1c on port 18081, mock-wms on 18082, partner-emulator on 18083). Partner-emulator
+changes its behaviour while it runs: `curl -X POST http://127.0.0.1:18083/control -d '{"ack_status":"R"}'`
+(`ack_status` is `A`, `E`, `R`, `P` or `none`; the other fields are `ack_delay_ms`, `mdn_delay_ms` and `mdn_drop`).
+The call is accepted only from the machine of the stand. `edigatectl fixtures load <file> --partner-tokens-out <file>`
+gives a token to each customer partner that has none and writes the tokens in the file the emulator reads.
 
 An operator reopens a failed order key over HTTP, not in the database:
 `edigatectl txn reopen --url http://127.0.0.1:18080 --token <operator token> <key-hex>`.

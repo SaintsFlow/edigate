@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["status", "txn_id"],
+  "properties": {
+    "status": { "enum": ["accepted", "pending_approval", "rejected", "expired"] },
+    "txn_id": { "type": "string" },
+    "approval_id": { "type": "string" },
+    "reason": { "enum": ["adapter_rejected", "dead", "approval_rejected", "saga_aborted", "no_mdn", "ack_rejected", "ack_conflict"] }
+  }
+}

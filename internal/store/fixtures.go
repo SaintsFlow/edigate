@@ -50,6 +50,47 @@ type FixturePrice struct {
 	UnitPrice string
 }
 
+// IssueMissingPartnerTokens gives a token to each of the partners that has no active one and
+// returns the tokens by partner id. The principal is named stand-<tenant>-<partner>. The
+// token is shown here once; only its hash is stored.
+func (s *Store) IssueMissingPartnerTokens(ctx context.Context, tenantID string, partnerIDs []string) (map[string]string, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT p.partner_id FROM partners p
+		 WHERE p.tenant_id = $1 AND p.partner_id = ANY($2)
+		   AND NOT EXISTS (SELECT 1 FROM principals pr WHERE pr.tenant_id = p.tenant_id AND pr.partner_id = p.partner_id
+		                   AND pr.kind = 'partner' AND pr.revoked_at IS NULL)
+		 ORDER BY p.partner_id`, tenantID, partnerIDs)
+	if err != nil {
+		return nil, err
+	}
+	var missing []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		missing = append(missing, id)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	tokens := map[string]string{}
+	for _, id := range missing {
+		token, sum, err := NewToken()
+		if err != nil {
+			return nil, err
+		}
+		p := Principal{ID: "stand-" + tenantID + "-" + id, TenantID: tenantID, Kind: "partner", PartnerID: id}
+		if err := s.IssuePrincipal(ctx, p, sum); err != nil {
+			return nil, err
+		}
+		tokens[id] = token
+	}
+	return tokens, nil
+}
+
 // LoadFixtures writes the data in one transaction. Running it again changes
 // nothing that is already there: tenants, partners and prices are updated in place,
 // contacts and ship-to codes are added only when new.

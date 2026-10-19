@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -42,6 +43,13 @@ type effectRequest struct {
 
 	SupplierOrder *policy.SupplierOrder
 
+	// PolicyTool is the name the policy knows the tool by, when the key is made under
+	// another name ("" means Tool). ForecastCents replaces the forecast of the partner for
+	// this call: the sagas compare a document with the order they belong to.
+	PolicyTool    string
+	ForecastCents *int64
+	Saga          *store.SagaLink
+
 	Key         [32]byte
 	BusinessKey []byte
 	ReqHash     []byte
@@ -59,7 +67,7 @@ type effectRequest struct {
 // effect.
 func reserveEffect(ctx context.Context, st *store.Store, dec Decider, c Caller, r effectRequest) (OrderResult, error) {
 	call := policy.ToolCall{
-		Tool: r.Tool, Effect: r.Effect, AmountCents: r.AmountCents, SupplierOrder: r.SupplierOrder,
+		Tool: cmp.Or(r.PolicyTool, r.Tool), Effect: r.Effect, AmountCents: r.AmountCents, SupplierOrder: r.SupplierOrder,
 		Document: policy.Document{ST01: r.ST01},
 	}
 	partner, err := st.PartnerPolicy(ctx, c.TenantID, r.Src.PartnerID)
@@ -72,6 +80,9 @@ func reserveEffect(ctx context.Context, st *store.Store, dec Decider, c Caller, 
 			ShipToCodes: partner.ShipToCodes, Contacts: partner.Contacts,
 		}
 		call.Document.SenderRole = partner.Role
+		if r.ForecastCents != nil {
+			call.Partner.ForecastCents = r.ForecastCents
+		}
 	case !errors.Is(err, store.ErrNotFound):
 		return OrderResult{}, err
 	}
@@ -84,7 +95,7 @@ func reserveEffect(ctx context.Context, st *store.Store, dec Decider, c Caller, 
 	in := store.ReserveInput{
 		TenantID: c.TenantID, Tool: r.Tool, PrincipalID: c.PrincipalID, TraceID: c.TraceID,
 		DocumentID: r.Src.ID, Key: r.Key[:], BusinessKey: r.BusinessKey, ReqHash: r.ReqHash,
-		EffectType: r.EffectType, Payload: r.Payload, ReviewView: reviewView,
+		EffectType: r.EffectType, Payload: r.Payload, ReviewView: reviewView, Saga: r.Saga,
 	}
 	if r.Counted && known {
 		in.PartnerID, in.AmountCents = r.Src.PartnerID, r.AmountCents

@@ -15,6 +15,10 @@
 // (a repeat of the same interchange returns the first MDN, another body under the
 // same ISA13 is refused) -> one audit row.
 //
+// A 997 is stored like any set and also matched, in the same transaction, to the document
+// the gateway sent (partner that sent it, AK102, AK202): that is how a document becomes
+// delivered or an incident (invariant I6).
+//
 // The MDN confirms transport, not content: a set rejected by the parser or by the
 // role of the partner is stored as rejected and the MDN still says "processed".
 package inbound
@@ -33,6 +37,7 @@ import (
 	"strings"
 
 	"github.com/SaintsFlow/edigate/internal/edge"
+	"github.com/SaintsFlow/edigate/internal/edi/document"
 	"github.com/SaintsFlow/edigate/internal/edi/x12"
 	"github.com/SaintsFlow/edigate/internal/rpcerr"
 	"github.com/SaintsFlow/edigate/internal/sanitize"
@@ -191,9 +196,14 @@ func (h *Handler) receive(ctx context.Context, w http.ResponseWriter, r *http.Re
 		return reply{status: http.StatusInternalServerError, reason: rpcerr.Internal, outcome: "internal", sha: sum[:]}
 	}
 	mdn := MDN{MessageID: newUUID() + "@edigate", OriginalMessageID: messageID, MICSHA256: hex.EncodeToString(sum[:]), Disposition: dispositionOK}
+	acks, err := acksOf(docs)
+	if err != nil {
+		h.log.Error("read the 997 failed", "error", err.Error())
+		return reply{status: http.StatusInternalServerError, reason: rpcerr.Internal, outcome: "internal", sha: sum[:]}
+	}
 	saved, err := h.store.SaveInbound(ctx, store.InboundInterchange{
 		TenantID: p.TenantID, PartnerID: p.PartnerID, ISA13: ic.ControlNumber(), MessageID: messageID,
-		Raw: body, SHA256: sum[:], MDN: mdn.bytes(), Documents: docs,
+		Raw: body, SHA256: sum[:], MDN: mdn.bytes(), Documents: docs, Acks: acks,
 	})
 	if err != nil {
 		h.log.Error("store interchange failed", "error", err.Error())
@@ -309,6 +319,28 @@ func buildDocuments(ic *x12.Interchange, partnerID, role string) ([]store.Inboun
 		}
 	}
 	return docs, nil
+}
+
+// acksOf takes the verdicts out of the accepted 997 sets: the group they answer (AK102)
+// and AK501 with the number of the set (AK202) for each. The store matches them to the
+// documents the gateway sent, in the transaction that stores the 997 (invariant I6).
+func acksOf(docs []store.InboundDocument) ([]store.InboundAck, error) {
+	var out []store.InboundAck
+	for _, d := range docs {
+		if d.ST01 != "997" || d.Status != "received" {
+			continue
+		}
+		var a document.Ack
+		if err := json.Unmarshal(d.Body, &a); err != nil {
+			return nil, err
+		}
+		ack := store.InboundAck{GS06: a.GroupControl}
+		for _, s := range a.Sets {
+			ack.Sets = append(ack.Sets, store.InboundAckSet{ST02: s.Control, Code: s.Ack})
+		}
+		out = append(out, ack)
+	}
+	return out, nil
 }
 
 // newUUID returns a random version 4 UUID.
