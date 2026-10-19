@@ -7,15 +7,21 @@
 //	edigatectl call --url URL --token TOKEN <tool> [JSON-arguments]
 //	edigatectl parse <file>
 //	edigatectl send --url URL --token T --from Q:ID --to Q:ID --file F [--message-id ID]
+//	edigatectl fixtures load <fixtures.json>
+//	edigatectl txn reopen --url URL --token OPERATOR_TOKEN <key-hex>
 //
-// tenant, partner and token commands work on the database directly
+// tenant, partner, token and fixtures commands work on the database directly
 // (EDIGATE_DB_URL): they are setup done on the gateway machine, not a network
 // API. "token issue" prints the token to stdout once; nothing else ever shows it.
 // "call" is a debugging MCP client. "parse" reads a file with the strict X12
 // parser and needs no database. "send" posts an interchange to /edi/inbound.
+// "fixtures load" reads the file of the corpus generator (tenant, partners with
+// limits, price list) and is safe to run again. "txn reopen" is an operator
+// action and goes over HTTP to /ops/ of the gateway at URL (for example
+// http://127.0.0.1:18080), so the audit log knows the operator.
 // Exit codes: 0 ok, 1 failed (for call: the server answered with a JSON-RPC
-// error; for parse: something was rejected; for send: the answer was not 200),
-// 2 wrong command line.
+// error; for parse: something was rejected; for send and txn reopen: the answer
+// was not 200), 2 wrong command line.
 package main
 
 import (
@@ -48,6 +54,8 @@ const usage = `usage:
   edigatectl call --url URL --token TOKEN <tool> [JSON-arguments]
   edigatectl parse <file>
   edigatectl send --url URL --token T --from Q:ID --to Q:ID --file F [--message-id ID]
+  edigatectl fixtures load <fixtures.json>
+  edigatectl txn reopen --url URL --token OPERATOR_TOKEN <key-hex>
 `
 
 // qualifiedID is ISA05:ISA06 or ISA07:ISA08: a two-character qualifier and an
@@ -92,6 +100,16 @@ func run(ctx context.Context, args []string, stdout io.Writer) error {
 		return parseFile(args[1:], stdout)
 	case "send":
 		return send(ctx, args[1:], stdout)
+	case "fixtures":
+		if len(args) == 3 && args[1] == "load" {
+			return fixturesLoad(ctx, args[2], stdout)
+		}
+		return usageError{"fixtures: expected: load <fixtures.json>"}
+	case "txn":
+		if len(args) >= 2 && args[1] == "reopen" {
+			return txnReopen(ctx, args[2:], stdout)
+		}
+		return usageError{"txn: expected: reopen --url URL --token T <key-hex>"}
 	case "token":
 		if len(args) < 2 {
 			return usageError{"token: expected issue or revoke"}

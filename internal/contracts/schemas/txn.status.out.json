@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["txn_id", "status", "external_ref"],
+  "properties": {
+    "txn_id": { "type": "string" },
+    "status": { "enum": ["accepted", "completed", "rejected"] },
+    "external_ref": { "type": ["string", "null"] }
+  }
+}

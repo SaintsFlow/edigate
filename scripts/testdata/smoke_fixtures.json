@@ -1,0 +1,18 @@
+{
+  "tenant": {"id": "smoke", "interchange_id": "ZZ:ZZTESTSUPPL", "currency": "USD"},
+  "partners": [
+    {
+      "partner_id": "ZZ:ZZTESTBUYER",
+      "role": "customer",
+      "name": "Smoke buyer",
+      "auto_max_amount": "5000.00",
+      "daily_auto_max": "50000.00",
+      "contacts": ["orders@buyer.test"],
+      "ship_to_codes": ["DC01"]
+    }
+  ],
+  "price_list": [
+    {"sku": "012345678905", "unit": "EA", "unit_price": "7.50"}
+  ],
+  "email_templates": []
+}

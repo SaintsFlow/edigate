@@ -1,7 +1,7 @@
 COMPOSE = docker compose -f deploy/compose/docker-compose.yml
 TEST_DB = postgres://edigate:edigate@127.0.0.1:55432/edigate?sslmode=disable
 
-.PHONY: build up down test fuzz smoke corpus
+.PHONY: build up down test fuzz smoke chaos-dup corpus
 
 build:
 	go build -o bin/ ./cmd/...
@@ -27,6 +27,13 @@ fuzz:
 
 smoke: build up
 	sh scripts/smoke.sh
+
+# Test only. Starts a stand with fault injection (eight gateway processes that keep
+# dying, a mock-1c that loses answers), makes 50 orders with repeated calls, and
+# checks one order per document after at least 100 restarts. It takes several
+# minutes and brings the normal stand back at the end.
+chaos-dup: build
+	sh scripts/chaos_dup.sh
 
 # Builds the EDI-Inject v1 corpus (seed 1) into bench/out/corpus-seed1, then checks that the
 # strict parser takes every document as its label says. Without -I, because -m needs the cwd.

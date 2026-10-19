@@ -1,0 +1,47 @@
+# Fault injection for `make chaos-dup`. TEST ONLY, never use these settings anywhere else.
+# Start with: docker compose -f docker-compose.yml -f chaos.yml up -d
+#
+# Eight gateway processes share the database: "edigate" (the one with the published
+# port) and edigate-r1 to edigate-r7 (no port, they only run the relay). Each one
+# exits by itself in two ways: at random inside the relay (EDIGATE_CHAOS_EXIT_*) and
+# at a random moment 11 to 16.5 seconds after start (EDIGATE_CHAOS_CRASH_AFTER).
+# Docker restarts them (restart: unless-stopped). Why eight and why 11 s: Docker
+# doubles the pause before a restart each time a container dies within 10 seconds
+# (up to one minute), so one container that dies often would restart about once a
+# minute. A life of at least 10 s resets the pause, and eight containers in parallel
+# give the 100 restarts in a few minutes. `docker kill` is no help: Docker treats
+# it as a manual stop and does not restart the container.
+
+x-chaos-env: &chaos-env
+  EDIGATE_DB_URL: postgres://edigate:edigate@postgres:5432/edigate?sslmode=disable&pool_max_conns=5
+  EDIGATE_LISTEN: 0.0.0.0:8080
+  EDIGATE_ONEC_URL: http://mock-onec:8081
+  EDIGATE_QUARANTINE_MODEL: ""
+  EDIGATE_RELAY_WORKERS: "2"
+  EDIGATE_TIME_SCALE: "20"
+  EDIGATE_CHAOS_EXIT_BEFORE_SEND: "0.2"
+  EDIGATE_CHAOS_EXIT_AFTER_APPLY: "0.3"
+  EDIGATE_CHAOS_CRASH_AFTER: "11s"
+
+x-gateway: &gateway
+  image: edigate-stand:local
+  restart: unless-stopped
+  environment: *chaos-env
+  depends_on:
+    postgres:
+      condition: service_healthy
+    mock-onec:
+      condition: service_healthy
+
+services:
+  mock-onec:
+    environment:
+      MOCK_FAIL_AFTER_COMMIT_RATE: "0.3"
+  edigate: *gateway
+  edigate-r1: *gateway
+  edigate-r2: *gateway
+  edigate-r3: *gateway
+  edigate-r4: *gateway
+  edigate-r5: *gateway
+  edigate-r6: *gateway
+  edigate-r7: *gateway

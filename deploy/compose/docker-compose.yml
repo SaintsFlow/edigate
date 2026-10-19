@@ -15,21 +15,47 @@ services:
       timeout: 3s
       retries: 30
 
+  # mock-1c: the stand's stand-in for the 1C HTTP service. It writes only to the
+  # schema mock_onec of the same database. Same image as the gateway, other binary.
+  mock-onec:
+    build:
+      context: ../..
+    image: edigate-stand:local
+    entrypoint: ["/mock-onec"]
+    environment:
+      MOCK_DB_URL: postgres://edigate:edigate@postgres:5432/edigate?sslmode=disable
+      MOCK_LISTEN: 0.0.0.0:8081
+    ports:
+      - "127.0.0.1:18081:8081"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "/mock-onec", "healthcheck"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
   edigate:
     build:
       context: ../..
+    image: edigate-stand:local
     environment:
       EDIGATE_DB_URL: postgres://edigate:edigate@postgres:5432/edigate?sslmode=disable
       EDIGATE_LISTEN: 0.0.0.0:8080
       # The quarantined reader: a model on the host (Ollama), reached from the container.
       EDIGATE_QUARANTINE_BASE_URL: http://host.docker.internal:11434/v1
       EDIGATE_QUARANTINE_MODEL: llama3.2:3b
+      # The ERP the relay delivers orders to.
+      EDIGATE_ONEC_URL: http://mock-onec:8081
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:
       - "127.0.0.1:18080:8080"
     depends_on:
       postgres:
+        condition: service_healthy
+      mock-onec:
         condition: service_healthy
     # The distroless image has no curl, so the binary checks itself.
     healthcheck:

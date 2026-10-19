@@ -13,12 +13,21 @@ Status: work in progress, v0.1 is not released.
   `edi.list_inbox` and `edi.read_document` show an agent the typed fields of a document and none of the partner's
   text, and `edi.extract_note` reads one note through a separate model call without tools and returns only the
   values of a closed schema. A note reference in the arguments of a tool with an effect is refused (`tainted_sink`).
-- Designed, not built yet: one effect per business key, the outbox and sagas that close on the 997 (functional
-  acknowledgement) and the MDN (AS2 receipt). The design is in [docs](docs).
+- Also works now: the first tool with an effect, `erp.create_sales_order`, and `txn.status`. The agent passes the id of
+  a received 850 and gets a `txn_id`; the price of every line comes from the price list, not from the 850. The key is
+  built from the tenant, the tool, the partner and BEG03, so the same order that arrives again in a new exchange is
+  the same order. A repeated call gets the same `txn_id`; the same BEG03 with another content is a
+  `conflicting_duplicate`. The key, the answer and an outbox row are written in one transaction, and a relay delivers
+  the outbox to the ERP (mock-1c on the stand) with retries and an idempotent receiver, so a crash of the gateway or a
+  lost answer of the ERP does not make a second order. `make chaos-dup` tests this (see below).
+- Not yet: policies and approvals (limits, ship-to and partner checks, risk levels, requests to an operator), sagas,
+  outgoing documents (855, 856) and the 997 and MDN receipts. `erp.create_sales_order` today checks the data of the
+  document and the price list, and nothing else: the limits of a partner are stored but not enforced. The design is
+  in [docs](docs).
 
 ## Try it
 
-You need Go 1.27, Docker, `curl`, and free local ports 55432 and 18080.
+You need Go 1.27, Docker, `curl`, and free local ports 55432, 18080 and 18081.
 
 ```sh
 make smoke
@@ -31,6 +40,20 @@ the partner's free text. If Ollama runs on the host (port 11434, model `llama3.2
 delivery instruction from a note; otherwise it prints `skip: n (ollama not reachable)` for that step. It prints
 `smoke ok` and exits with code 0 when everything matches. The stand keeps running afterwards; `make down` stops
 it and deletes its data.
+
+The smoke test also loads a small price list (`edigatectl fixtures load <file>`; the corpus generator writes a file
+of the same format), creates an order from the received 850, repeats the call, waits until `txn.status` says
+`completed` and checks the order in mock-1c.
+
+`make chaos-dup` is the test of the one-order guarantee. It starts a stand with fault injection (settings in
+`deploy/compose/chaos.yml`, test only): eight gateway processes that exit at random, and a mock-1c that sometimes saves
+an order and then answers 500. It sends 50 purchase orders, creates an order for each, repeats every call after any
+error, and keeps repeating until Docker has restarted the gateway at least 100 times. It exits with code 0 only if
+mock-1c holds exactly 50 orders, one per document, and each document got one `txn_id` in the whole run. It takes
+several minutes and puts the normal stand back at the end.
+
+An operator reopens a failed order key over HTTP, not in the database:
+`edigatectl txn reopen --url http://127.0.0.1:18080 --token <operator token> <key-hex>`.
 
 `make test` runs `go vet`, the tests with the race detector and `govulncheck`. It starts PostgreSQL in Docker and
 downloads govulncheck on the first run. `make fuzz` fuzzes the X12 parser for 60 seconds. A test against a real

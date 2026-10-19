@@ -62,6 +62,16 @@ func New(r Reason, message string) *jsonrpc.Error {
 	return build(table[r].code, r, message)
 }
 
+// Denied is the policy_denied error with data.explain: the names of the checks
+// that failed, without any data of the document or of a policy.
+func Denied(explain []string) *jsonrpc.Error {
+	data, _ := json.Marshal(struct {
+		Reason  Reason   `json:"reason"`
+		Explain []string `json:"explain"`
+	}{PolicyDenied, explain})
+	return &jsonrpc.Error{Code: table[PolicyDenied].code, Message: string(PolicyDenied), Data: data}
+}
+
 // HeaderMismatch is the error for MCP headers that disagree with the body:
 // code -32020, reason schema_invalid.
 func HeaderMismatch(message string) *jsonrpc.Error {

@@ -55,6 +55,7 @@ type InboundDocument struct {
 	ST01        string
 	ST02        string
 	BusinessRef string // "" is stored as NULL
+	BKRef       string // raw BEG03 or BIG02, internal only; "" is stored as NULL
 	Body        []byte // JSON; nil is stored as NULL
 	Status      string // received or rejected
 	Errors      []byte // JSON array; nil is stored as NULL
@@ -148,10 +149,10 @@ func (s *Store) SaveInbound(ctx context.Context, in InboundInterchange) (SaveRes
 		var docID string
 		err = tx.QueryRow(ctx,
 			`INSERT INTO edi_documents
-			   (interchange_id, tenant_id, partner_id, gs06, st01, st02, business_ref, body, status, errors)
-			 VALUES ($1::uuid, $2, $3, $4, $5, $6, NULLIF($7, ''), $8, $9, $10)
+			   (interchange_id, tenant_id, partner_id, gs06, st01, st02, business_ref, bk_ref, body, status, errors)
+			 VALUES ($1::uuid, $2, $3, $4, $5, $6, NULLIF($7, ''), NULLIF($8, ''), $9, $10, $11)
 			 RETURNING id::text`,
-			id, in.TenantID, in.PartnerID, d.GS06, d.ST01, d.ST02, d.BusinessRef, d.Body, d.Status, d.Errors).Scan(&docID)
+			id, in.TenantID, in.PartnerID, d.GS06, d.ST01, d.ST02, d.BusinessRef, d.BKRef, d.Body, d.Status, d.Errors).Scan(&docID)
 		if err != nil {
 			return SaveResult{}, fmt.Errorf("store document: %w", err)
 		}

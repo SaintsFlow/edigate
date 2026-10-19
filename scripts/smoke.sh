@@ -8,7 +8,11 @@
 # reader (a local model, skipped when Ollama is not reachable); the same
 # interchange again gives the same MDN and no new rows; the same ISA13 with
 # another body gives 409; a foreign AS2-From gives 403; the gateway log holds
-# none of the partner's text.
+# none of the partner's text. Wave 2-5 adds: fixtures load; the agent orders from the
+# 850 (accepted, a txn_id), the same call gives the same answer, txn.status turns
+# completed and mock-1c holds one order priced from the price list; a note reference
+# in the arguments is refused (by the schema); the answers hold no business key,
+# idempotency key or price of the 850.
 # Exits 0 only if every check matches. Safe to run again: principal ids carry a
 # random suffix, ISA13 comes from the clock, and the EDI rows of the tenant
 # "smoke" (stand data only) are cleared at the start so that step a still sees
@@ -79,12 +83,16 @@ send() {
 
 CALL_BODY='{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"edi.list_inbox","arguments":{}}}'
 
-sql "DELETE FROM quarantine_calls WHERE tenant_id = 'smoke'" "DELETE FROM edi_notes WHERE tenant_id = 'smoke'" \
+sql "DELETE FROM outbox WHERE tenant_id = 'smoke'" "DELETE FROM idempotency_keys WHERE tenant_id = 'smoke'" \
+	"DELETE FROM mock_onec.sales_orders WHERE tenant_id = 'smoke'" \
+	"DELETE FROM quarantine_calls WHERE tenant_id = 'smoke'" "DELETE FROM edi_notes WHERE tenant_id = 'smoke'" \
 	"DELETE FROM edi_documents WHERE tenant_id = 'smoke'" "DELETE FROM edi_interchanges WHERE tenant_id = 'smoke'" \
 	"DELETE FROM edi_rejected WHERE tenant_id = 'smoke'" >/dev/null
 
 "$BIN/edigatectl" tenant add smoke "Smoke tenant" --interchange-id "$GATEWAY" >/dev/null
 "$BIN/edigatectl" partner add --tenant smoke --partner "$BUYER" --role customer --name "Smoke buyer" >/dev/null
+# The price list of the stand: 7.50 for the SKU of the smoke 850, whose own price (PO104) is 5.25.
+"$BIN/edigatectl" fixtures load scripts/testdata/smoke_fixtures.json >/dev/null
 AGENT_TOKEN=$("$BIN/edigatectl" token issue --tenant smoke --kind agent --id "$AGENT_ID")
 OPERATOR_TOKEN=$("$BIN/edigatectl" token issue --tenant smoke --kind operator --id "$OPERATOR_ID")
 PARTNER_TOKEN=$("$BIN/edigatectl" token issue --tenant smoke --kind partner --id "$PARTNER_ID" --partner "$BUYER")
@@ -173,6 +181,90 @@ if curl -s -m 3 http://127.0.0.1:11434/api/tags >/dev/null 2>&1; then
 else
 	echo "skip: n (ollama not reachable)"
 fi
+
+# (p) the agent creates an order from the 850: accepted and a txn_id
+AGENT_OUT="$TMP/agent_answers"
+call_agent() { "$BIN/edigatectl" call --url "$URL" --token "$AGENT_TOKEN" "$@"; }
+ordered=$(call_agent erp.create_sales_order "{\"source_document_id\":\"$DOC_ID\"}") || fail "p: erp.create_sales_order failed: $ordered"
+echo "$ordered" >>"$AGENT_OUT"
+expect "p accepted" "$ordered" '"status":"accepted"'
+TXN_ID=$(printf '%s' "$ordered" | sed -n 's/.*"txn_id":"\([^"]*\)".*/\1/p')
+[ -n "$TXN_ID" ] || fail "p: no txn_id in: $ordered"
+
+# (r) the same call again: the same answer byte for byte, no second key and no second outbox row
+again_order=$(call_agent erp.create_sales_order "{\"source_document_id\":\"$DOC_ID\"}") || fail "r: the repeat failed: $again_order"
+echo "$again_order" >>"$AGENT_OUT"
+[ "$again_order" = "$ordered" ] || fail "r: the answer differs: $ordered / $again_order"
+n=$(sql "SELECT count(*) FROM idempotency_keys WHERE tenant_id = 'smoke'")
+[ "$n" = 1 ] || fail "r: expected one key, got $n"
+n=$(sql "SELECT count(*) FROM outbox WHERE tenant_id = 'smoke'")
+[ "$n" = 1 ] || fail "r: expected one outbox row, got $n"
+echo "ok: r same txn_id, one key, one outbox row"
+
+# (s) a few seconds later the relay has delivered it: txn.status is completed with an external
+# reference; mock-1c holds one order with this business reference and the prices of the price
+# list (7.50), not the price of the 850 (PO104 = 5.25)
+waited=0
+while :; do
+	status=$(call_agent txn.status "{\"txn_id\":\"$TXN_ID\"}") || fail "s: txn.status failed: $status"
+	case "$status" in *'"status":"completed"'*) break ;; esac
+	waited=$((waited + 1))
+	[ "$waited" -le 40 ] || fail "s: the order was not delivered in 20 s: $status"
+	sleep 0.5
+done
+echo "$status" >>"$AGENT_OUT"
+expect "s completed" "$status" '"status":"completed"'
+case "$status" in *'"external_ref":null'* | *'"external_ref":""'*) fail "s: no external reference: $status" ;; esac
+expect "s external_ref" "$status" '"external_ref":"'
+KEY_HEX=$(sql "SELECT encode(key, 'hex') FROM idempotency_keys WHERE tenant_id = 'smoke'")
+row=$(sql "SELECT total::text || '|' || (lines->0->>'unit_price') || '|' || external_id FROM mock_onec.sales_orders WHERE tenant_id = 'smoke' AND business_ref = '$ORDER'")
+[ "$row" = "75.00|7.50|$KEY_HEX" ] || fail "s: mock-1c row (total|first price|external id): $row"
+n=$(sql "SELECT count(*) FROM mock_onec.sales_orders WHERE tenant_id = 'smoke' AND business_ref = '$ORDER'")
+[ "$n" = 1 ] || fail "s: expected one order in mock-1c, got $n"
+n=$(sql "SELECT count(*) FROM mock_onec.sales_orders WHERE tenant_id = 'smoke' AND lines::text LIKE '%5.25%'")
+[ "$n" = 0 ] || fail "s: the price of the 850 reached mock-1c"
+echo "ok: s delivered with the prices of the price list"
+
+# (t) a note reference in delivery_instruction. The input schema holds an enum, so the schema check
+# refuses it first and the answer is schema_invalid, not tainted_sink: the taint check cannot be
+# reached through this tool, and the argument that could carry a reference (source_document_id)
+# is a uuid. The taint check itself is covered by TestT_TAINT_01 (a unit test with the
+# schema check switched off). Here we check that the refusal is clean: exit 1, no new key.
+rc=0
+refused=$(call_agent erp.create_sales_order '{"source_document_id":"'"$DOC_ID"'","delivery_instruction":"$note_1"}') || rc=$?
+[ "$rc" = 1 ] || fail "t: expected exit code 1, got $rc"
+expect "t schema_invalid (the enum refuses it before the taint check)" "$refused" '"reason":"schema_invalid"'
+rc=0
+refused=$(call_agent erp.create_sales_order '{"source_document_id":"$note_1"}') || rc=$?
+[ "$rc" = 1 ] || fail "t: expected exit code 1, got $rc"
+expect "t schema_invalid for a reference as the document" "$refused" '"reason":"schema_invalid"'
+n=$(sql "SELECT count(*) FROM idempotency_keys WHERE tenant_id = 'smoke'")
+[ "$n" = 1 ] || fail "t: a refused call left a key ($n keys)"
+
+# (q) what the agent saw: no business key, no price of the 850, no idempotency key
+for leak in bk_ref "$KEY_HEX" "5.25" "$ORDER"; do
+	if grep -q -- "$leak" "$AGENT_OUT"; then
+		fail "q: '$leak' is in the answers the agent got: $(cat "$AGENT_OUT")"
+	fi
+done
+echo "ok: q no bk_ref, key, price of the 850 or business reference in the answers"
+
+# (u) the operator entrance /ops/ through edigatectl: a key that is not failed gives 409, an
+# unknown key 404, an agent token 403 (a failed key is reopened in TestT_IDEM_05)
+rc=0
+out=$("$BIN/edigatectl" txn reopen --url http://127.0.0.1:18080 --token "$OPERATOR_TOKEN" "$KEY_HEX") || rc=$?
+[ "$rc" = 1 ] || fail "u: expected exit code 1, got $rc"
+expect "u HTTP 409" "$out" "HTTP 409"
+expect "u key is not failed" "$out" "key is not failed"
+rc=0
+out=$("$BIN/edigatectl" txn reopen --url http://127.0.0.1:18080 --token "$OPERATOR_TOKEN" 0000000000000000000000000000000000000000000000000000000000000000) || rc=$?
+[ "$rc" = 1 ] || fail "u: expected exit code 1, got $rc"
+expect "u HTTP 404" "$out" "HTTP 404"
+expect "u not_found" "$out" '"reason":"not_found"'
+rc=0
+out=$("$BIN/edigatectl" txn reopen --url http://127.0.0.1:18080 --token "$AGENT_TOKEN" "$KEY_HEX") || rc=$?
+[ "$rc" = 1 ] || fail "u: expected exit code 1, got $rc"
+expect "u HTTP 403" "$out" "HTTP 403"
 
 # (i) the same interchange again: 200, the same MDN byte for byte, one row
 sleep 1

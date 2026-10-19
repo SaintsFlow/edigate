@@ -31,6 +31,9 @@ const (
 	listInbox    = "edi.list_inbox"
 	readDocument = "edi.read_document"
 	extractNote  = "edi.extract_note"
+
+	createSalesOrder = tools.CreateOrderTool
+	txnStatus        = "txn.status"
 )
 
 // toolRates are the own buckets of tools, per principal, on top of the general
@@ -106,6 +109,26 @@ func New(st *store.Store, reader quarantine.QuarantinedReader, log *slog.Logger)
 				return nil, rpcerr.New(rpcerr.SchemaInvalid, "")
 			}
 			return tools.ExtractNote(ctx, st, s.reader, id.TenantID, id.TraceID, in)
+		})
+	s.add(srv, createSalesOrder, "Create a sales order in the ERP from a received purchase order (850). Pass the "+
+		"document id and, if the partner asked for one, a delivery instruction from the fixed list. Prices, partner "+
+		"and quantities are taken by the gateway from the document and the price list. Calling again for the same "+
+		"order returns the same txn_id and creates nothing new. Use txn.status with the txn_id to follow the order.",
+		func(ctx context.Context, id edge.Identity, args json.RawMessage) (any, error) {
+			var in tools.CreateSalesOrderInput
+			if err := json.Unmarshal(args, &in); err != nil {
+				return nil, rpcerr.New(rpcerr.SchemaInvalid, "")
+			}
+			return tools.CreateSalesOrder(ctx, st, tools.Caller{TenantID: id.TenantID, PrincipalID: id.PrincipalID, TraceID: id.TraceID}, in)
+		})
+	s.add(srv, txnStatus, "Show where a transaction stands: accepted (queued), completed (the effect is confirmed, "+
+		"with the reference of the other system) or rejected.",
+		func(ctx context.Context, id edge.Identity, args json.RawMessage) (any, error) {
+			var in tools.TxnStatusInput
+			if err := json.Unmarshal(args, &in); err != nil {
+				return nil, rpcerr.New(rpcerr.SchemaInvalid, "")
+			}
+			return tools.TxnStatus(ctx, st, id.TenantID, in)
 		})
 	return srv
 }

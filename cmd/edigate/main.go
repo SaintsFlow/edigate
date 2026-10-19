@@ -1,6 +1,7 @@
 // Command edigate runs the gateway: config -> database pool -> migrations ->
-// edge + MCP server and the partner entrance -> HTTP server (/mcp,
-// /edi/inbound, /healthz). It stops gracefully on SIGINT or SIGTERM.
+// edge + MCP server, the partner entrance and the operator entrance -> HTTP
+// server (/mcp, /edi/inbound, /ops/, /healthz), and the relay that delivers the
+// outbox to the ERP. It stops gracefully on SIGINT or SIGTERM.
 //
 // "edigate healthcheck" is the container healthcheck (the distroless image has
 // no curl): it calls /healthz on the local listen port and exits 0 or 1.
@@ -21,12 +22,15 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/SaintsFlow/edigate/internal/adapters"
 	"github.com/SaintsFlow/edigate/internal/config"
 	"github.com/SaintsFlow/edigate/internal/edge"
 	"github.com/SaintsFlow/edigate/internal/inbound"
 	"github.com/SaintsFlow/edigate/internal/mcpserver"
+	"github.com/SaintsFlow/edigate/internal/ops"
 	"github.com/SaintsFlow/edigate/internal/quarantine"
 	"github.com/SaintsFlow/edigate/internal/store"
+	"github.com/SaintsFlow/edigate/internal/txn"
 )
 
 func main() {
@@ -70,7 +74,20 @@ func run() error {
 	mux := http.NewServeMux()
 	mux.Handle("/mcp", gate.MCP(sdk))
 	mux.Handle("/edi/inbound", inbound.New(gate, st, log))
+	mux.Handle("/ops/", ops.New(gate, st, log))
 	mux.HandleFunc("GET /healthz", healthz(st))
+
+	chaos := txn.NewChaos(cfg.ChaosExitBeforeSend, cfg.ChaosExitAfterApply, cfg.ChaosCrashAfter, cfg.ChaosSeed)
+	chaos.Start()
+	if cfg.OnecURL != "" {
+		relay := &txn.Relay{
+			Store: st, Adapter: adapters.NewOnec(cfg.OnecURL), Workers: cfg.RelayWorkers,
+			Scale: cfg.TimeScale, Log: log, Chaos: chaos,
+		}
+		go relay.Run(ctx)
+	} else {
+		log.Warn("EDIGATE_ONEC_URL is not set: the relay is off and orders stay queued")
+	}
 
 	srv := &http.Server{Addr: cfg.Listen, Handler: mux, ReadHeaderTimeout: 10 * time.Second}
 	errc := make(chan error, 1)

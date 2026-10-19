@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"strings"
 
 	"github.com/SaintsFlow/edigate/internal/edi/document"
 	"github.com/SaintsFlow/edigate/internal/edi/x12"
@@ -48,8 +49,11 @@ type Note struct {
 // its format); Notes is empty for a 997.
 type Result struct {
 	BusinessRef string
-	Body        []byte
-	Notes       []Note
+	// BKRef is the raw BEG03 (850) or BIG02 (810) without spaces at the edges: the
+	// value the idempotency key is built from. Internal only, never shown to the agent.
+	BKRef string
+	Body  []byte
+	Notes []Note
 }
 
 // The formats of the listed elements.
@@ -69,14 +73,14 @@ var (
 func Build(set *x12.Set, partnerID string) (Result, error) {
 	b := &builder{label: "partner:" + partnerID}
 	var body any
-	var ref string
+	var ref, bk string
 	switch st01 := set.ST.Value(1); st01 {
 	case "850":
 		v := b.build850(set, partnerID)
-		body, ref = v, v.Header.BusinessRef
+		body, ref, bk = v, v.Header.BusinessRef, rawElement(set, "BEG", 3)
 	case "810":
 		v := b.build810(set, partnerID)
-		body, ref = v, v.Header.BusinessRef
+		body, ref, bk = v, v.Header.BusinessRef, rawElement(set, "BIG", 2)
 	case "997":
 		raw, err := document.BuildAck(set)
 		return Result{Body: raw}, err
@@ -90,7 +94,18 @@ func Build(set *x12.Set, partnerID string) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	return Result{BusinessRef: ref, Body: raw, Notes: b.notes}, nil
+	return Result{BusinessRef: ref, BKRef: bk, Body: raw, Notes: b.notes}, nil
+}
+
+// rawElement returns element n of the first segment id of the set, trimmed of
+// spaces at the edges ("" when there is none).
+func rawElement(set *x12.Set, id string, n int) string {
+	for i := range set.Segments {
+		if set.Segments[i].ID == id {
+			return strings.TrimSpace(set.Segments[i].Value(n))
+		}
+	}
+	return ""
 }
 
 // builder walks the segments of one set in order and collects the notes.

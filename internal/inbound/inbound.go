@@ -297,7 +297,7 @@ func buildDocuments(ic *x12.Interchange, partnerID, role string) ([]store.Inboun
 				if err != nil {
 					return nil, err
 				}
-				d.Status, d.BusinessRef, d.Body = "received", built.BusinessRef, built.Body
+				d.Status, d.BusinessRef, d.BKRef, d.Body = "received", built.BusinessRef, built.BKRef, built.Body
 				for _, n := range built.Notes {
 					d.Notes = append(d.Notes, store.InboundNote{
 						Ref: n.Ref, SegmentPath: n.SegmentPath, Reason: n.Reason, Body: n.Text,
