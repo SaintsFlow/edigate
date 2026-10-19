@@ -172,7 +172,7 @@ echo "ok: s sagas are in their own databases, the mocks hold both orders and bot
 
 # (l) the transport log
 expect "l transport log of slot a" "$(cat "$TMP/a.jsonl")" '"tool":"erp.create_sales_order"'
-expect "l the log holds a trace id" "$(/usr/bin/head -1 "$TMP/a.jsonl")" '"trace_id":"'
+expect "l the log holds a trace id" "$(sed -n '1p' "$TMP/a.jsonl")" '"trace_id":"'
 
 # (p) mode plain
 list=$(curl -s -X POST http://127.0.0.1:18192/mcp -H "Authorization: Bearer $(cat "$TMP/p.agent")" \

@@ -30,6 +30,7 @@ import (
 
 	"github.com/SaintsFlow/edigate/internal/adapters"
 	"github.com/SaintsFlow/edigate/internal/approval"
+	"github.com/SaintsFlow/edigate/internal/audit"
 	"github.com/SaintsFlow/edigate/internal/config"
 	"github.com/SaintsFlow/edigate/internal/edge"
 	"github.com/SaintsFlow/edigate/internal/inbound"
@@ -90,6 +91,31 @@ func run() error {
 	defer st.Close()
 	if err := st.Migrate(ctx); err != nil {
 		return err
+	}
+
+	// The anchors of the audit chain: every 100 rows of a tenant, signed, in the database and in a
+	// file outside it. Without a key the chain is written all the same.
+	switch {
+	case cfg.AuditSigningKey == "":
+		log.Info("audit anchors are off: EDIGATE_AUDIT_SIGNING_KEY is not set (the hash chain is written all the same)")
+	default:
+		anchors, err := audit.NewAnchorer(cfg.AuditSigningKey, cfg.AuditAnchorDir)
+		if err != nil {
+			return fmt.Errorf("EDIGATE_AUDIT_SIGNING_KEY: %w", err)
+		}
+		if cfg.AuditAnchorDir == "" {
+			log.Warn("EDIGATE_AUDIT_ANCHOR_DIR is not set: anchors stay in the database, a cut tail would not show")
+		}
+		anchorsCtx, stopAnchors := context.WithCancel(ctx)
+		anchorsDone := make(chan struct{})
+		go func() {
+			defer close(anchorsDone)
+			st.RunAuditAnchors(anchorsCtx, anchors, 2*time.Second, log)
+		}()
+		defer func() { // the last pass runs before the pool closes
+			stopAnchors()
+			<-anchorsDone
+		}()
 	}
 
 	reader := quarantine.NewReader(quarantine.NewHTTPCompleter(cfg.QuarantineBaseURL, cfg.QuarantineAPIKey), cfg.QuarantineModel, st)

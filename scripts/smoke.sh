@@ -24,7 +24,9 @@
 # --accept-lint (ш1); rugpull-rates is pinned (ш2), three calls pass with the taint label (ш3), the
 # fourth is manifest_drift and the audit row holds both hashes (ш4); no client token at the hostile
 # servers (ш5); the price list; a letter to a contact of the partner arrives once and a letter to a
-# contact of another partner is policy_denied with email.recipient (щ).
+# contact of another partner is policy_denied with email.recipient (щ). Wave 2-10 adds the audit
+# step (aud): principal and trace in every row, the key in the rows of an effect, and
+# `edigatectl audit verify` ok for the tenant, with the signed anchors and their file.
 # Exits 0 only if every check matches. Safe to run again: principal ids carry a
 # random suffix, ISA13 comes from the clock, and the EDI rows of the tenant
 # "smoke" (stand data only) are cleared at the start so that step a still sees
@@ -112,12 +114,9 @@ CALL_BODY='{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"edi.l
 # Wave 2-8: the pair of keys that signs the pins of upstream tools. The private half stays in
 # deploy/compose/keys (not mounted into the gateway); the public half goes to the gateway through
 # deploy/compose/.env, and the gateway is recreated only when it changed.
-KEYS=deploy/compose/keys
-mkdir -p "$KEYS"
-[ -f "$KEYS/manifest.key" ] || "$BIN/edigatectl" manifests keygen --out "$KEYS/manifest.key" >"$KEYS/manifest.pub"
-chmod 644 "$KEYS/manifest.key" # the stand's own key; the one-off container of pinctl runs as another user
-printf 'EDIGATE_MANIFEST_PUBKEY=%s\n' "$(cat "$KEYS/manifest.pub")" >deploy/compose/.env
-$COMPOSE up -d --wait edigate >/dev/null 2>&1 || fail "the gateway did not restart with the manifest key"
+# Wave 2-10 adds the key of the audit anchors (scripts/stand_keys.sh makes both pairs).
+. scripts/stand_keys.sh
+$COMPOSE up -d --wait edigate >/dev/null 2>&1 || fail "the gateway did not restart with the keys"
 
 sql "DELETE FROM manifests" "DELETE FROM upstream_notes WHERE tenant_id = 'smoke'" \
 	"DELETE FROM mock_partner.received WHERE kind = 'email' AND tenant_id = 'smoke'" >/dev/null
@@ -682,6 +681,25 @@ expect "щ body refused" "$out" '"reason":"schema_invalid"'
 n=$(sql "SELECT count(*) FROM mock_partner.received WHERE kind = 'email' AND business_ref = '$MAIL_REF'")
 [ "$n" = 1 ] || fail "щ: refused letters reached the mail service ($n letters)"
 echo "ok: щ one letter to a contact of the partner, a stranger refused with email.recipient"
+
+# --- wave 2-10: the audit log after the whole run (controls AUD-01 and AUD-02) ---
+
+# (aud) every row names its principal and trace, an effect names its key, and the hash chain and
+# the signed anchors of the tenant verify (the gateway writes the anchors every 2 s; the file of
+# the anchors is outside the database)
+n=$(sql "SELECT count(*) FROM audit_log WHERE principal_id = '' OR trace_id = ''")
+[ "$n" = 0 ] || fail "aud: $n audit rows without principal_id or trace_id"
+# (the 997 that answers a partner is the one effect with no key, so its rows are left out of the second check)
+n=$(sql "SELECT count(*) FROM audit_log WHERE idem_key IS NULL AND event_type IN ('effect_reserved', 'effect_failed')")
+[ "$n" = 0 ] || fail "aud: $n effect rows without idem_key"
+n=$(sql "SELECT count(*) FROM audit_log WHERE tenant_id = 'smoke' AND idem_key IS NOT NULL AND event_type = 'effect_applied'")
+[ "$n" -ge 1 ] || fail "aud: no effect_applied rows with idem_key"
+sleep 3
+rc=0
+out=$("$BIN/edigatectl" audit verify --tenant smoke --pubkey "$(cat "$KEYS/audit.pub")" --anchor-dir deploy/compose/stand/anchors 2>&1) || rc=$?
+[ "$rc" = 0 ] || fail "aud: audit verify exited with $rc: $out"
+expect "aud verify" "$out" "ok "
+echo "ok: aud rows have principal and trace, effects have the key, the chain verifies"
 
 # (o) the gateway log holds none of the partner's text
 logs=$($COMPOSE logs --no-color edigate)

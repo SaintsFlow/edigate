@@ -53,6 +53,12 @@ type Config struct {
 	ManifestPubKey string              `yaml:"manifest_pubkey"`
 	UpstreamAllow  map[string][]string `yaml:"upstream_allow"`
 
+	// The key (base64 ed25519, environment only) that signs the anchors of the audit chain, and
+	// the directory outside the database where the anchors are also written. Without a key the
+	// chain is written but there are no anchors; without a directory the anchors stay in the database.
+	AuditSigningKey string `yaml:"-"`
+	AuditAnchorDir  string `yaml:"audit_anchor_dir"`
+
 	// Fault injection for tests of the guarantee only (see .env.example). Off by
 	// default; read from the environment only.
 	ChaosExitBeforeSend float64       `yaml:"-"`
@@ -105,6 +111,10 @@ func Load(path string) (Config, error) {
 	}
 	if v := os.Getenv("EDIGATE_MANIFEST_PUBKEY"); v != "" {
 		c.ManifestPubKey = v
+	}
+	c.AuditSigningKey = os.Getenv("EDIGATE_AUDIT_SIGNING_KEY")
+	if v := os.Getenv("EDIGATE_AUDIT_ANCHOR_DIR"); v != "" {
+		c.AuditAnchorDir = v
 	}
 	if v := os.Getenv("EDIGATE_PUBLIC_URL"); v != "" {
 		c.PublicURL = v

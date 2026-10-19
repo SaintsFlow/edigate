@@ -37,6 +37,12 @@
 // "manifests" pins the descriptions of the tools of an upstream MCP server (see
 // manifests.go): keygen makes the signing key, pin reads the live tool list of the server
 // named in the config, lints it and stores a signed pin per tool, list shows the pins.
+//
+//	edigatectl audit keygen --out FILE
+//	edigatectl audit verify --tenant T [--from N --to M] [--anchor-dir D] [--pubkey K]
+//
+// "audit" makes the key that signs the anchors of the audit chain and checks the chain of a
+// tenant and its anchors (see audit.go).
 // Exit codes: 0 ok, 1 failed (for call: the server answered with a JSON-RPC
 // error; for parse: something was rejected; for send and txn reopen: the answer
 // was not 200), 2 wrong command line.
@@ -80,6 +86,8 @@ const usage = `usage:
   edigatectl manifests keygen --out FILE
   edigatectl manifests pin --config FILE --server S --signing-key FILE [--accept-lint] [--by NAME]
   edigatectl manifests list [--server S]
+  edigatectl audit keygen --out FILE
+  edigatectl audit verify --tenant T [--from N --to M] [--anchor-dir D] [--pubkey K]
 `
 
 // qualifiedID is ISA05:ISA06 or ISA07:ISA08: a two-character qualifier and an
@@ -145,6 +153,8 @@ func run(ctx context.Context, args []string, stdout io.Writer) error {
 		return approvals(ctx, args[1:], stdout)
 	case "manifests":
 		return manifests(ctx, args[1:], stdout)
+	case "audit":
+		return auditCommand(ctx, args[1:], stdout)
 	case "token":
 		if len(args) < 2 {
 			return usageError{"token: expected issue or revoke"}

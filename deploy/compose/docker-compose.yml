@@ -73,6 +73,9 @@ services:
       PARTNER_LISTEN: 0.0.0.0:8083
       GATEWAY_URL: http://edigate:8080
       PARTNER_TOKENS_FILE: /stand/partner_tokens.json
+    # The benchmark slots are gateway processes on the host; on Linux the name needs this line.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ./stand:/stand:ro
     ports:
@@ -141,10 +144,16 @@ services:
     command: ["--config", "/etc/edigate/edigate.yaml"]
     volumes:
       - ./edigate.yaml:/etc/edigate/edigate.yaml:ro
+      - ./stand/anchors:/anchors
     environment:
       # The public key that verifies the pinned tool descriptions. Empty switches the upstream
       # servers off. scripts/smoke.sh makes a key pair and writes this to deploy/compose/.env.
       EDIGATE_MANIFEST_PUBKEY: ${EDIGATE_MANIFEST_PUBKEY:-}
+      # The key that signs the anchors of the audit chain, and the directory (a folder of the host,
+      # outside the database) the anchors are also written to. scripts/smoke.sh and scripts/demo.sh
+      # make the key and write it to deploy/compose/.env. Empty key: no anchors, the chain is written.
+      EDIGATE_AUDIT_SIGNING_KEY: ${EDIGATE_AUDIT_SIGNING_KEY:-}
+      EDIGATE_AUDIT_ANCHOR_DIR: /anchors
       RUGPULL_GATEWAY_KEY: stand-only-rugpull-key
       EDIGATE_DB_URL: postgres://edigate:edigate@postgres:5432/edigate?sslmode=disable
       EDIGATE_LISTEN: 0.0.0.0:8080

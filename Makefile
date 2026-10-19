@@ -1,7 +1,7 @@
 COMPOSE = docker compose -f deploy/compose/docker-compose.yml
 TEST_DB = postgres://edigate:edigate@127.0.0.1:55432/edigate?sslmode=disable
 
-.PHONY: build up down test policy-test fuzz smoke slots chaos-dup corpus bench-venv bench-test bench-prepare bench-smoke
+.PHONY: build up down test policy-test fuzz smoke demo slots chaos-dup corpus bench-venv bench-test bench-prepare bench-smoke
 
 build:
 	go build -o bin/ ./cmd/...
@@ -9,8 +9,10 @@ build:
 up:
 	$(COMPOSE) up -d --build --wait
 
+# Removes the stand and its data, and the anchor files of the audit chain (they belong to the data of the stand).
 down:
 	$(COMPOSE) down -v
+	rm -rf deploy/compose/stand/anchors
 
 # The tests of the Rego policy (policies/*_test.rego), one or more per rule.
 policy-test:
@@ -31,6 +33,13 @@ fuzz:
 
 smoke: build up
 	sh scripts/smoke.sh
+
+# Three scenarios run by a script (S1 an injection that reaches no effect, S2 a saga with receipts, S3
+# faults without duplicates and a changed audit row found). It wipes the stand and builds it again, so
+# a second run starts the same way, and prints "demo ok" with code 0. The stand stays up (make down).
+# Ollama on the host is optional (one step reads a note through the quarantined model).
+demo: build
+	sh scripts/demo.sh
 
 # Live check of the modes and of the slots on the running stand: four gateway processes of bin/edigate
 # (two of mode full, one plain, one reqhash) with databases of their own and the mocks of the stand in
