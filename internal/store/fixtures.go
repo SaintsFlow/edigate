@@ -13,6 +13,13 @@ type Fixtures struct {
 	Currency      string
 	Partners      []FixturePartner
 	Prices        []FixturePrice
+	Templates     []FixtureTemplate
+}
+
+// FixtureTemplate is a mail template the tenant may use with notify.send_email.
+type FixtureTemplate struct {
+	TemplateID string
+	Category   string
 }
 
 // FixturePartner is a partner with its limits, contacts and ship-to codes.
@@ -154,6 +161,14 @@ func (s *Store) LoadFixtures(ctx context.Context, f Fixtures) error {
 			 ON CONFLICT (tenant_id, sku) DO UPDATE
 			   SET unit_price = EXCLUDED.unit_price, currency = EXCLUDED.currency, unit = EXCLUDED.unit`,
 			f.TenantID, p.SKU, p.UnitPrice, f.Currency, p.Unit); err != nil {
+			return err
+		}
+	}
+	for _, t := range f.Templates {
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO email_templates (tenant_id, template_id, category) VALUES ($1, $2, $3)
+			 ON CONFLICT (tenant_id, template_id) DO UPDATE SET category = EXCLUDED.category`,
+			f.TenantID, t.TemplateID, t.Category); err != nil {
 			return err
 		}
 	}

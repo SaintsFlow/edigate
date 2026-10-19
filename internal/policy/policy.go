@@ -96,8 +96,27 @@ type Engine struct {
 	query rego.PreparedEvalQuery
 }
 
+// Option changes the data the policy reads (data.json is the default).
+type Option func(data map[string]any)
+
+// WithUpstreamAllow sets data.upstream_allow: the up.* tools each tenant may call.
+// Without it every upstream tool is forbidden (TL-07).
+func WithUpstreamAllow(allow map[string][]string) Option {
+	return func(data map[string]any) {
+		generic := map[string]any{}
+		for tenant, names := range allow {
+			list := make([]any, 0, len(names))
+			for _, n := range names {
+				list = append(list, n)
+			}
+			generic[tenant] = list
+		}
+		data["upstream_allow"] = generic
+	}
+}
+
 // New compiles the embedded policy and prepares it for evaluation.
-func New(ctx context.Context) (*Engine, error) {
+func New(ctx context.Context, opts ...Option) (*Engine, error) {
 	module, err := fs.ReadFile(policies.FS, "edigate.rego")
 	if err != nil {
 		return nil, err
@@ -111,6 +130,9 @@ func New(ctx context.Context) (*Engine, error) {
 	dec.UseNumber()
 	if err := dec.Decode(&data); err != nil {
 		return nil, fmt.Errorf("policy data: %w", err)
+	}
+	for _, opt := range opts {
+		opt(data)
 	}
 	store := inmem.NewFromObject(data)
 	q, err := rego.New(

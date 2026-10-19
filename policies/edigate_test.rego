@@ -192,3 +192,66 @@ test_denied_invoice_is_not_an_approval if {
 	d := edigate.decision with input as invoice(30001, [["SKU-1", 10000, 300]])
 	d.approval == "none"
 }
+
+# ---- wave 2-8: letters and upstream tools ----
+
+mail(to) := object.union(order(0), {
+	"tool": "notify.send_email",
+	"effect": {"to": to, "template_id": "tpl_order_received", "amount_cents": 0},
+})
+
+test_email_to_a_contact_is_automatic if {
+	d := edigate.decision with input as mail("orders@buyer.test")
+	d == {"allow": true, "tier": 2, "approval": "none", "deny": [], "fired": []}
+}
+
+test_email_to_a_stranger_is_denied if {
+	d := edigate.decision with input as mail("someone@else.test")
+	d.allow == false
+	d.deny == ["email.recipient"]
+	d.approval == "none"
+}
+
+test_email_for_an_unknown_partner_is_denied if {
+	i := object.union(mail("orders@buyer.test"), {"partner": null})
+	d := edigate.decision with input as i
+	d.allow == false
+	"partner.unknown" in d.deny
+}
+
+test_email_ignores_the_forecast if {
+	i := object.union(mail("orders@buyer.test"), {"partner": object.union(buyer, {"forecast_cents": null})})
+	d := edigate.decision with input as i
+	d.fired == []
+}
+
+upstream_call(tool) := {
+	"principal": {"id": "agent-1", "kind": "agent", "tenant": "ta"},
+	"tool": tool,
+	"effect": {"city": "Almaty"},
+	"partner": null,
+	"daily_auto_cents": 0,
+	"document": {"st01": "", "sender_role": ""},
+	"supplier_order": null,
+}
+
+test_upstream_is_denied_by_default if {
+	d := edigate.decision with input as upstream_call("up.rates.get_rates")
+	d.allow == false
+	d.deny == ["upstream.not_allowed"]
+}
+
+test_upstream_allowed_for_the_tenant if {
+	d := edigate.decision with input as upstream_call("up.rates.get_rates") with data.upstream_allow as {"ta": ["up.rates.get_rates"]}
+	d == {"allow": true, "tier": 2, "approval": "none", "deny": [], "fired": []}
+}
+
+test_upstream_allowed_for_another_tenant_only if {
+	d := edigate.decision with input as upstream_call("up.rates.get_rates") with data.upstream_allow as {"tb": ["up.rates.get_rates"]}
+	d.deny == ["upstream.not_allowed"]
+}
+
+test_upstream_allows_one_tool_only if {
+	d := edigate.decision with input as upstream_call("up.rates.other") with data.upstream_allow as {"ta": ["up.rates.get_rates"]}
+	d.deny == ["upstream.not_allowed"]
+}

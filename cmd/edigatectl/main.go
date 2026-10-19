@@ -25,6 +25,14 @@
 // the approval requests of the operator's tenant and approves or rejects one; a
 // request that needs two operators stays pending until a second, different
 // operator token approves it.
+//
+//	edigatectl manifests keygen --out FILE
+//	edigatectl manifests pin --config FILE --server S --signing-key FILE [--accept-lint] [--by NAME]
+//	edigatectl manifests list [--server S]
+//
+// "manifests" pins the descriptions of the tools of an upstream MCP server (see
+// manifests.go): keygen makes the signing key, pin reads the live tool list of the server
+// named in the config, lints it and stores a signed pin per tool, list shows the pins.
 // Exit codes: 0 ok, 1 failed (for call: the server answered with a JSON-RPC
 // error; for parse: something was rejected; for send and txn reopen: the answer
 // was not 200), 2 wrong command line.
@@ -63,6 +71,9 @@ const usage = `usage:
   edigatectl fixtures load <fixtures.json> [--partner-tokens-out <file>]
   edigatectl txn reopen --url URL --token OPERATOR_TOKEN <key-hex>
   edigatectl approvals list|approve|reject --url URL --token OPERATOR_TOKEN [--status S] [id]
+  edigatectl manifests keygen --out FILE
+  edigatectl manifests pin --config FILE --server S --signing-key FILE [--accept-lint] [--by NAME]
+  edigatectl manifests list [--server S]
 `
 
 // qualifiedID is ISA05:ISA06 or ISA07:ISA08: a two-character qualifier and an
@@ -119,6 +130,8 @@ func run(ctx context.Context, args []string, stdout io.Writer) error {
 		return usageError{"txn: expected: reopen --url URL --token T <key-hex>"}
 	case "approvals":
 		return approvals(ctx, args[1:], stdout)
+	case "manifests":
+		return manifests(ctx, args[1:], stdout)
 	case "token":
 		if len(args) < 2 {
 			return usageError{"token: expected issue or revoke"}

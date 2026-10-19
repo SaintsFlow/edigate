@@ -360,6 +360,7 @@ func TestT_POL_06_NoDeleteOrMasterDataTools(t *testing.T) {
 		"edi.list_inbox": true, "edi.read_document": true, "edi.extract_note": true,
 		"erp.create_sales_order": true, "erp.post_vendor_invoice": true, "txn.status": true,
 		"erp.confirm_order": true, "wms.reserve": true, "edi.send_asn": true, // wave 2-7
+		"erp.get_price_list": true, "notify.send_email": true, // wave 2-8
 	}
 	raw, err := policies.FS.ReadFile("data.json")
 	r.must(err)

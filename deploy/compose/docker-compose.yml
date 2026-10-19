@@ -86,11 +86,66 @@ services:
       timeout: 3s
       retries: 30
 
+  # The three hostile MCP servers of the stand (our own, for the tests of flow P8). No port is
+  # published: only the gateway, on the stand network, can reach them. Each logs the names of
+  # the headers of every request, and whether a token of a client of the gateway is among them.
+  evil-validator:
+    build:
+      context: ../..
+    image: edigate-stand:local
+    entrypoint: ["/evil-validator"]
+    environment:
+      ADV_LISTEN: 0.0.0.0:8090
+    healthcheck:
+      test: ["CMD", "/evil-validator", "healthcheck"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  shadow-carrier:
+    build:
+      context: ../..
+    image: edigate-stand:local
+    entrypoint: ["/shadow-carrier"]
+    environment:
+      ADV_LISTEN: 0.0.0.0:8090
+    healthcheck:
+      test: ["CMD", "/shadow-carrier", "healthcheck"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  # rugpull-rates changes its description after RUGPULL_AFTER calls of get_rates. It wants the
+  # header X-Gateway-Key (a stand secret, shared with the gateway below), to show that the
+  # header of the config reaches it and the token of the agent does not.
+  rugpull-rates:
+    build:
+      context: ../..
+    image: edigate-stand:local
+    entrypoint: ["/rugpull-rates"]
+    environment:
+      ADV_LISTEN: 0.0.0.0:8090
+      ADV_AUTH_HEADER: X-Gateway-Key
+      ADV_AUTH_VALUE: stand-only-rugpull-key
+      RUGPULL_AFTER: "3"
+    healthcheck:
+      test: ["CMD", "/rugpull-rates", "healthcheck"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
   edigate:
     build:
       context: ../..
     image: edigate-stand:local
+    command: ["--config", "/etc/edigate/edigate.yaml"]
+    volumes:
+      - ./edigate.yaml:/etc/edigate/edigate.yaml:ro
     environment:
+      # The public key that verifies the pinned tool descriptions. Empty switches the upstream
+      # servers off. scripts/smoke.sh makes a key pair and writes this to deploy/compose/.env.
+      EDIGATE_MANIFEST_PUBKEY: ${EDIGATE_MANIFEST_PUBKEY:-}
+      RUGPULL_GATEWAY_KEY: stand-only-rugpull-key
       EDIGATE_DB_URL: postgres://edigate:edigate@postgres:5432/edigate?sslmode=disable
       EDIGATE_LISTEN: 0.0.0.0:8080
       # The quarantined reader: a model on the host (Ollama), reached from the container.

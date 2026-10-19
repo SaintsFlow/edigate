@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/SaintsFlow/edigate/internal/upstream"
 )
 
 // Config is everything the gateway needs to start in this version.
@@ -34,6 +36,14 @@ type Config struct {
 	// warehouse effects queued; an empty PartnerURL leaves the documents for the partner queued.
 	WMSURL     string `yaml:"wms_url"`
 	PartnerURL string `yaml:"partner_url"`
+
+	// The upstream MCP servers the gateway may pass tools of on (flow P8), the public key
+	// (base64, ed25519) that verifies their pinned descriptions, and the up.* tools each
+	// tenant may call (data of the policy; empty means none). Without servers there are no
+	// up.* tools. Servers without a key are switched off at start (see upstream.New).
+	Upstreams      []upstream.Server   `yaml:"upstreams"`
+	ManifestPubKey string              `yaml:"manifest_pubkey"`
+	UpstreamAllow  map[string][]string `yaml:"upstream_allow"`
 
 	// Fault injection for tests of the guarantee only (see .env.example). Off by
 	// default; read from the environment only.
@@ -85,6 +95,9 @@ func Load(path string) (Config, error) {
 	if v := os.Getenv("EDIGATE_PARTNER_URL"); v != "" {
 		c.PartnerURL = v
 	}
+	if v := os.Getenv("EDIGATE_MANIFEST_PUBKEY"); v != "" {
+		c.ManifestPubKey = v
+	}
 	if c.Listen == "" {
 		c.Listen = defaultListen
 	}
@@ -98,6 +111,22 @@ func Load(path string) (Config, error) {
 		return Config{}, err
 	}
 	return c, c.check()
+}
+
+// LoadUpstreams reads only the list of upstream servers from the YAML file. edigatectl
+// uses it to pin the tools of a server without the rest of the gateway settings.
+func LoadUpstreams(path string) ([]upstream.Server, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read config: %w", err)
+	}
+	var c struct {
+		Upstreams []upstream.Server `yaml:"upstreams"`
+	}
+	if err := yaml.Unmarshal(data, &c); err != nil {
+		return nil, fmt.Errorf("parse config: %w", err)
+	}
+	return c.Upstreams, upstream.CheckAll(c.Upstreams)
 }
 
 // loadEnvNumbers reads the numeric settings of the relay and of fault injection.
@@ -163,6 +192,9 @@ func (c Config) check() error {
 	}
 	if c.QuarantineModel != "" && c.QuarantineBaseURL == "" {
 		return errors.New("EDIGATE_QUARANTINE_BASE_URL is required when EDIGATE_QUARANTINE_MODEL is set")
+	}
+	if err := upstream.CheckAll(c.Upstreams); err != nil {
+		return err
 	}
 	if c.RelayWorkers < 1 || c.TimeScale <= 0 {
 		return errors.New("EDIGATE_RELAY_WORKERS must be at least 1 and EDIGATE_TIME_SCALE above 0")

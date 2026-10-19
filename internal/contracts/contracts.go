@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strings"
 	"sync"
 
 	"github.com/google/jsonschema-go/jsonschema"
@@ -34,6 +35,22 @@ func Input(tool string) (json.RawMessage, error) {
 // Output returns the raw output schema of a tool, for the tool listing.
 func Output(tool string) (json.RawMessage, error) {
 	return files.ReadFile("schemas/" + tool + ".out.json")
+}
+
+// ToolNames lists the tools that have a schema: the tools of the gateway. The linter of
+// upstream descriptions uses it to find references to them.
+func ToolNames() []string {
+	entries, err := files.ReadDir("schemas")
+	if err != nil {
+		return nil
+	}
+	var names []string
+	for _, e := range entries {
+		if name, ok := strings.CutSuffix(e.Name(), ".in.json"); ok {
+			names = append(names, name)
+		}
+	}
+	return names
 }
 
 // Validate checks raw tool arguments against the input schema of the tool.

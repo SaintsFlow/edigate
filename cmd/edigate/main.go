@@ -35,6 +35,7 @@ import (
 	"github.com/SaintsFlow/edigate/internal/store"
 	"github.com/SaintsFlow/edigate/internal/txn"
 	"github.com/SaintsFlow/edigate/internal/txn/saga"
+	"github.com/SaintsFlow/edigate/internal/upstream"
 )
 
 func main() {
@@ -69,13 +70,20 @@ func run() error {
 	}
 
 	reader := quarantine.NewReader(quarantine.NewHTTPCompleter(cfg.QuarantineBaseURL, cfg.QuarantineAPIKey), cfg.QuarantineModel, st)
-	engine, err := policy.New(ctx)
+	engine, err := policy.New(ctx, policy.WithUpstreamAllow(cfg.UpstreamAllow))
 	if err != nil {
 		return err
 	}
 	st.SetApprovalTTL(approval.TTL(cfg.TimeScale))
 	go approval.Run(ctx, st, log)
-	mcpServer := mcpserver.New(st, reader, engine, log)
+	up, err := upstream.New(cfg.Upstreams, cfg.ManifestPubKey, st, log, os.Getenv)
+	if err != nil {
+		return err
+	}
+	// At start every upstream is read once: a tool without a valid pin is named in the log. It
+	// runs apart, so that a server that does not answer cannot hold the start back.
+	go up.Refresh(ctx, nil)
+	mcpServer := mcpserver.New(st, reader, engine, log, mcpserver.WithUpstream(up))
 	sdk := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return mcpServer },
 		&mcp.StreamableHTTPOptions{Stateless: true, JSONResponse: true})
 
@@ -91,6 +99,9 @@ func run() error {
 	chaos.Start()
 	if cfg.OnecURL != "" {
 		effects := adapters.Mux{Onec: adapters.NewOnec(cfg.OnecURL)}
+		if cfg.PartnerURL != "" {
+			effects.Mail = adapters.NewMail(cfg.PartnerURL) // the letters go to the same stand service
+		}
 		var facts saga.Facts // nil without a warehouse: shipment sagas then wait
 		if cfg.WMSURL != "" {
 			wms := adapters.NewWMS(cfg.WMSURL)

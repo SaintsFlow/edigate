@@ -20,7 +20,8 @@ const fixtures = `{
     {"partner_id": "ZZ:ZZTESTOTHER", "role": "customer", "name": "Other", "auto_max_amount": "5000.00", "daily_auto_max": "50000.00"},
     {"partner_id": "ZZ:ZZTESTVENDOR", "role": "supplier", "name": "Vendor"}
   ],
-  "price_list": [{"sku": "SKU-1", "unit": "EA", "unit_price": "1.00"}]
+  "price_list": [{"sku": "SKU-1", "unit": "EA", "unit_price": "1.00"}],
+  "email_templates": [{"template_id": "tpl_order_received", "category": "order_confirmation"}, {"template_id": "tpl_contact_back", "category": "contact_request"}]
 }`
 
 // fixtures load --partner-tokens-out gives a token to each customer partner that has none and keeps
@@ -44,6 +45,12 @@ func TestFixturesLoadWritesPartnerTokens(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "partner tokens: 0 issued, 2 in") {
 		t.Errorf("the second run must issue nothing: %s", out.String())
+	}
+	if ok, err := st.HasEmailTemplate(ctx, "stand", "tpl_order_received"); err != nil || !ok {
+		t.Errorf("mail template was not stored: %v %v", ok, err)
+	}
+	if ok, _ := st.HasEmailTemplate(ctx, "stand", "tpl_delivery_date"); ok {
+		t.Error("a template that is not in the file was stored")
 	}
 	raw, err := os.ReadFile(tokens)
 	if err != nil {

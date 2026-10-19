@@ -24,6 +24,7 @@ const (
 	EffectWMSShip     = "wms.ship"
 	EffectSend855     = "edi.send_855"
 	EffectSend856     = "edi.send_856"
+	EffectEmail       = "notify.email"
 )
 
 // IsSend reports whether the effect is a document sent to a partner.

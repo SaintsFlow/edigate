@@ -7,12 +7,14 @@ import (
 	"strings"
 )
 
-// Mux gives every effect to the adapter that owns its type: onec.* to the ERP and
-// wms.* to the warehouse. An adapter that is nil was not configured: the effect fails
-// with a temporary error and is tried again, so that configuring it later is enough.
+// Mux gives every effect to the adapter that owns its type: onec.* to the ERP, wms.* to
+// the warehouse and notify.* to the mail service. An adapter that is nil was not
+// configured: the effect fails with a temporary error and is tried again, so that
+// configuring it later is enough.
 type Mux struct {
 	Onec Adapter
 	WMS  Adapter
+	Mail Adapter
 }
 
 func (m Mux) pick(effectType string) (Adapter, error) {
@@ -22,6 +24,8 @@ func (m Mux) pick(effectType string) (Adapter, error) {
 		a = m.Onec
 	case strings.HasPrefix(effectType, "wms."):
 		a = m.WMS
+	case strings.HasPrefix(effectType, "notify."):
+		a = m.Mail
 	default:
 		return nil, &StatusError{Code: http.StatusBadRequest}
 	}

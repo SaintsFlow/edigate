@@ -8,6 +8,10 @@
 // written to mock_partner.received, also a repeat with the same ISA13: a test counts the
 // different ISA13 values to see how many documents the partner really got.
 //
+// The emulator is also the mail service of the stand: POST /email takes a letter as a
+// template id, an address and an order number, makes the text itself and writes a row with
+// kind = 'email' (once per external_id); GET /email?external_id= says whether it is there.
+//
 // The behaviour is set by knobs that tests and the stand change at run time with POST /control
 // (only from the stand's own addresses: loopback and private networks): the delay and the
 // verdict of the 997 (A, E, R, P with mixed verdicts, none), the delay of the MDN and the
@@ -55,7 +59,11 @@ CREATE TABLE IF NOT EXISTS mock_partner.received (
     message_id   text NOT NULL,
     received_at  timestamptz NOT NULL DEFAULT now()
 );
-CREATE SEQUENCE IF NOT EXISTS mock_partner.control_seq;`
+CREATE SEQUENCE IF NOT EXISTS mock_partner.control_seq;
+ALTER TABLE mock_partner.received ADD COLUMN IF NOT EXISTS kind        text NOT NULL DEFAULT 'as2';
+ALTER TABLE mock_partner.received ADD COLUMN IF NOT EXISTS recipient   text NULL;
+ALTER TABLE mock_partner.received ADD COLUMN IF NOT EXISTS template_id text NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS received_email_once ON mock_partner.received (message_id) WHERE kind = 'email';`
 
 // Migrate creates the schema, the table and the counter of the emulator if they are missing.
 // tenant_id of a row is the id the gateway sent under (AS2-From), because the partner does
@@ -126,6 +134,8 @@ func (s *Server) current() Knobs {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /as2", s.receive)
+	mux.HandleFunc("POST /email", s.receiveEmail)
+	mux.HandleFunc("GET /email", s.findEmail)
 	mux.HandleFunc("GET /control", s.control)
 	mux.HandleFunc("POST /control", s.control)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {

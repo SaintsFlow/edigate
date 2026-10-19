@@ -27,5 +27,9 @@
   "price_list": [
     {"sku": "012345678905", "unit": "EA", "unit_price": "7.50"}
   ],
-  "email_templates": []
+  "email_templates": [
+    {"template_id": "tpl_order_received", "category": "order_confirmation"},
+    {"template_id": "tpl_delivery_date", "category": "delivery_date"},
+    {"template_id": "tpl_contact_back", "category": "contact_request"}
+  ]
 }

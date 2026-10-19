@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["prices"],
+  "properties": {
+    "prices": {
+      "type": "array",
+      "maxItems": 50,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["sku", "unit_price", "currency", "unit"],
+        "properties": {
+          "sku": { "type": "string" },
+          "unit_price": { "type": "string", "pattern": "^[0-9]{1,16}\\.[0-9]{2}$" },
+          "currency": { "type": "string", "pattern": "^[A-Z]{3}$" },
+          "unit": { "type": "string", "pattern": "^[A-Z0-9]{2}$" }
+        }
+      }
+    }
+  }
+}

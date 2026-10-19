@@ -12,7 +12,10 @@
 #   document        {st01, sender_role}
 #   supplier_order  null, or {total_cents, currency, lines_norm}
 # Data (data.json): the tier of every tool, the role and the document it needs,
-# and the allowed deviation from the forecast in percent.
+# and the allowed deviation from the forecast in percent. upstream_allow lists, by
+# tenant, the up.* tools the tenant may call (empty by default: all are forbidden).
+# A tool may carry no_amount (nothing to compare with the forecast) and check_recipient
+# (input.effect.to must be a contact of the partner).
 #
 # Output: data.edigate.decision = {allow, tier, approval, deny, fired}.
 # deny names the rules that forbid the action; fired names the rules that turn an
@@ -24,11 +27,34 @@ tool := data.tools[input.tool]
 
 partner_known if is_object(input.partner)
 
+# A tool of an upstream MCP server (wave 2-8). It has no partner and no document: the
+# only question is whether the tenant may call it (data.upstream_allow).
+is_upstream if startswith(input.tool, "up.")
+
 # ---- deny ----
 
-deny contains "tool.unknown" if not tool
+deny contains "tool.unknown" if {
+	not tool
+	not is_upstream
+}
 
-deny contains "partner.unknown" if not partner_known
+deny contains "partner.unknown" if {
+	not partner_known
+	not is_upstream
+}
+
+# An upstream tool is forbidden unless the data of the policy names it for the tenant (TL-07).
+deny contains "upstream.not_allowed" if {
+	is_upstream
+	not input.tool in object.get(data.upstream_allow, input.principal.tenant, [])
+}
+
+# A letter goes only to a contact of the partner of the source document (XP-01).
+deny contains "email.recipient" if {
+	tool.check_recipient
+	partner_known
+	not input.effect.to in input.partner.contacts
+}
 
 deny contains "partner.inactive" if {
 	partner_known
@@ -97,8 +123,11 @@ within_daily if {
 }
 
 # An irreversible action (T2) goes through automatically only close to the forecast.
+# A tool without an amount (a letter) has nothing to compare, and an upstream tool has no partner.
 fired contains "forecast.deviation" if {
 	tier == 2
+	tool
+	not tool.no_amount
 	not within_forecast
 }
 
@@ -114,6 +143,9 @@ fired contains "tier.three" if tier == 3
 # ---- decision ----
 
 tier := tool.tier
+
+# An upstream tool has an effect we cannot see, so it is counted as irreversible (T2).
+tier := 2 if is_upstream
 
 default tier := -1
 

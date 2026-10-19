@@ -33,8 +33,9 @@ var sinks = map[string]bool{
 // sinkPrefix marks every tool of the upstream gateway as a sink.
 const sinkPrefix = "up."
 
-// noteRef finds a note reference inside any string.
-var noteRef = regexp.MustCompile(`\$note_[0-9]+`)
+// noteRef finds a reference inside any string: $note_N is partner text, $up_N is the
+// text of a quarantined upstream result.
+var noteRef = regexp.MustCompile(`\$(note|up)_[0-9]+`)
 
 // IsSink reports whether the tool has an effect.
 func IsSink(tool string) bool {

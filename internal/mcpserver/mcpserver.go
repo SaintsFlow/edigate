@@ -12,6 +12,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"log/slog"
+	"strings"
 	"sync"
 
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
@@ -25,6 +26,7 @@ import (
 	"github.com/SaintsFlow/edigate/internal/store"
 	"github.com/SaintsFlow/edigate/internal/taint"
 	"github.com/SaintsFlow/edigate/internal/tools"
+	"github.com/SaintsFlow/edigate/internal/upstream"
 )
 
 const (
@@ -38,6 +40,8 @@ const (
 	wmsReserve        = tools.WMSReserveTool
 	sendASN           = tools.SendASNTool
 	txnStatus         = "txn.status"
+	priceList         = tools.PriceListTool
+	sendEmail         = tools.SendEmailTool
 )
 
 // toolRates are the own buckets of tools, per principal, on top of the general
@@ -54,6 +58,7 @@ type server struct {
 	store  *store.Store
 	reader quarantine.QuarantinedReader // nil: edi.extract_note answers quarantine_invalid
 	policy tools.Decider                // decides every tool with an effect
+	up     *upstream.Gateway            // nil: no upstream servers, every up.* name is not_found
 	log    *slog.Logger
 
 	// Schema checks; tests replace them to register tools that have no schema file yet.
@@ -78,12 +83,23 @@ func newServer(st *store.Store, reader quarantine.QuarantinedReader, dec tools.D
 	}
 }
 
+// Option changes how New builds the server.
+type Option func(*server)
+
+// WithUpstream gives the server the upstream MCP servers whose pinned tools it passes on
+// as up.<server>.<tool>.
+func WithUpstream(g *upstream.Gateway) Option { return func(s *server) { s.up = g } }
+
 // New builds the MCP server with all tools registered. reader is the
 // quarantined reader behind edi.extract_note; nil switches that tool off. dec is
 // the policy that decides the tools with an effect.
-func New(st *store.Store, reader quarantine.QuarantinedReader, dec tools.Decider, log *slog.Logger) *mcp.Server {
+func New(st *store.Store, reader quarantine.QuarantinedReader, dec tools.Decider, log *slog.Logger, opts ...Option) *mcp.Server {
 	s := newServer(st, reader, dec, log)
+	for _, opt := range opts {
+		opt(s)
+	}
 	srv := mcp.NewServer(&mcp.Implementation{Name: "edigate", Version: "0.1.0-dev"}, nil)
+	srv.AddReceivingMiddleware(s.upstreamMiddleware)
 	s.add(srv, listInbox, "List the documents in the tenant's inbox.",
 		func(ctx context.Context, id edge.Identity, args json.RawMessage) (any, error) {
 			var in tools.ListInboxInput
@@ -173,6 +189,26 @@ func New(st *store.Store, reader quarantine.QuarantinedReader, dec tools.Decider
 				return nil, rpcerr.New(rpcerr.SchemaInvalid, "")
 			}
 			return tools.SendASN(ctx, st, dec, callerOf(id), in)
+		})
+	s.add(srv, priceList, "Read the prices of your price list for 1 to 50 SKUs. The answer holds a row for each SKU "+
+		"that is in the list, with the unit price, the currency and the unit. A SKU that is not in the list is left out.",
+		func(ctx context.Context, id edge.Identity, args json.RawMessage) (any, error) {
+			var in tools.PriceListInput
+			if err := json.Unmarshal(args, &in); err != nil {
+				return nil, rpcerr.New(rpcerr.SchemaInvalid, "")
+			}
+			return tools.GetPriceList(ctx, st, callerOf(id), in)
+		})
+	s.add(srv, sendEmail, "Send a standard letter to a contact of the partner of a received order (850). Pass the "+
+		"document id, the address (it must be a contact of that partner) and a template: tpl_order_received, "+
+		"tpl_delivery_date or tpl_contact_back. The letter has no free text: it is made from the template and the "+
+		"order number. One letter per order and template. Use txn.status with the txn_id to follow it.",
+		func(ctx context.Context, id edge.Identity, args json.RawMessage) (any, error) {
+			var in tools.SendEmailInput
+			if err := json.Unmarshal(args, &in); err != nil {
+				return nil, rpcerr.New(rpcerr.SchemaInvalid, "")
+			}
+			return tools.SendEmail(ctx, st, dec, callerOf(id), in)
 		})
 	s.add(srv, txnStatus, "Show where a transaction stands: accepted (queued), completed (the effect is confirmed, "+
 		"with the reference of the other system) or rejected. For a step of a saga it also shows saga_state.",
@@ -269,6 +305,9 @@ func (s *server) allow(tool, principal string) bool {
 func (s *server) run(ctx context.Context, tool string, svc service, id edge.Identity, args json.RawMessage) (*mcp.CallToolResult, error) {
 	if !s.allow(tool, id.PrincipalID) {
 		return nil, rpcerr.New(rpcerr.RateLimited, "")
+	}
+	if strings.HasPrefix(tool, upstream.Prefix) {
+		return s.runUpstream(ctx, tool, id, args)
 	}
 	if err := s.validateIn(tool, args); err != nil {
 		return nil, rpcerr.New(rpcerr.SchemaInvalid, "arguments do not match the tool schema")

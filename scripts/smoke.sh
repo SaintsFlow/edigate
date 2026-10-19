@@ -19,7 +19,12 @@
 # reservation -> shipment -> 856 through partner-emulator, both documents delivered (MDN and
 # a positive 997) and both sagas done, one 855 and one 856 at the partner with different ISA13
 # (c); then a negative 997 (PARTNER_ACK_STATUS=R through /control) for a new order: the saga is an
-# incident and no second 855 with a new ISA13 goes out (ch).
+# incident and no second 855 with a new ISA13 goes out (ch). Wave 2-8 adds: the key pair for the pins
+# of upstream tools; a tool without a pin is off (ш0); evil-validator cannot be pinned, also with
+# --accept-lint (ш1); rugpull-rates is pinned (ш2), three calls pass with the taint label (ш3), the
+# fourth is manifest_drift and the audit row holds both hashes (ш4); no client token at the hostile
+# servers (ш5); the price list; a letter to a contact of the partner arrives once and a letter to a
+# contact of another partner is policy_denied with email.recipient (щ).
 # Exits 0 only if every check matches. Safe to run again: principal ids carry a
 # random suffix, ISA13 comes from the clock, and the EDI rows of the tenant
 # "smoke" (stand data only) are cleared at the start so that step a still sees
@@ -104,6 +109,18 @@ send() {
 
 CALL_BODY='{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"edi.list_inbox","arguments":{}}}'
 
+# Wave 2-8: the pair of keys that signs the pins of upstream tools. The private half stays in
+# deploy/compose/keys (not mounted into the gateway); the public half goes to the gateway through
+# deploy/compose/.env, and the gateway is recreated only when it changed.
+KEYS=deploy/compose/keys
+mkdir -p "$KEYS"
+[ -f "$KEYS/manifest.key" ] || "$BIN/edigatectl" manifests keygen --out "$KEYS/manifest.key" >"$KEYS/manifest.pub"
+chmod 644 "$KEYS/manifest.key" # the stand's own key; the one-off container of pinctl runs as another user
+printf 'EDIGATE_MANIFEST_PUBKEY=%s\n' "$(cat "$KEYS/manifest.pub")" >deploy/compose/.env
+$COMPOSE up -d --wait edigate >/dev/null 2>&1 || fail "the gateway did not restart with the manifest key"
+
+sql "DELETE FROM manifests" "DELETE FROM upstream_notes WHERE tenant_id = 'smoke'" \
+	"DELETE FROM mock_partner.received WHERE kind = 'email' AND tenant_id = 'smoke'" >/dev/null
 sql "DELETE FROM outbound_docs WHERE tenant_id = 'smoke'" \
 	"DELETE FROM saga_steps WHERE saga_id IN (SELECT id FROM sagas WHERE tenant_id = 'smoke')" "DELETE FROM sagas WHERE tenant_id = 'smoke'" \
 	"DELETE FROM control_numbers WHERE tenant_id = 'smoke'" \
@@ -536,6 +553,130 @@ case "$(call_agent txn.status "{\"txn_id\":\"$S2_TXN\"}")" in
 *) fail "s2: txn.status does not show saga_state incident" ;;
 esac
 echo "ok: s2 (ch) a negative 997: incident, a review request, no second 855"
+
+# --- wave 2-8: upstream servers (pins, a description that changes), the price list, the letters ---
+
+# pinctl <edigatectl arguments>: edigatectl inside the stand network (the hostile servers have no
+# published port). It gets the signing key as a volume of this one container only.
+pinctl() {
+	$COMPOSE run --rm --no-deps -T -v "$PWD/$KEYS:/keys:ro" --entrypoint /edigatectl edigate "$@"
+}
+PIN_ARGS="--config /etc/edigate/edigate.yaml --signing-key /keys/manifest.key"
+
+# tools_list: the names of the tools the agent sees now.
+tools_list() {
+	CALL_BODY='{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'
+	code=$(post "$AGENT_TOKEN" "$TMP/list") || fail "tools/list failed"
+	[ "$code" = 200 ] || fail "tools/list: HTTP $code"
+	cat "$TMP/list"
+}
+
+# Fresh hostile servers: the counter of rugpull-rates starts again and its description is clean.
+$COMPOSE up -d --force-recreate --wait evil-validator shadow-carrier rugpull-rates >/dev/null 2>&1 || fail "ш: the hostile servers did not start"
+sql "DELETE FROM manifests" >/dev/null
+
+# (ш0) a tool without a pin is off: the agent does not see it
+case "$(tools_list)" in
+*'up.rugpull-rates'* | *'up.evil-validator'* | *'up.shadow-carrier'*) fail "ш0: a tool without a pin is listed" ;;
+*) echo "ok: ш0 tools without a pin are off" ;;
+esac
+
+# (ш1) the poisoned description is not pinned, also with --accept-lint
+rc=0
+out=$(pinctl manifests pin $PIN_ARGS --server evil-validator 2>&1) || rc=$?
+[ "$rc" = 1 ] || fail "ш1: expected exit code 1, got $rc: $out"
+expect "ш1 finding" "$out" 'tool_reference: edi.send_asn'
+rc=0
+out=$(pinctl manifests pin $PIN_ARGS --server evil-validator --accept-lint 2>&1) || rc=$?
+[ "$rc" = 1 ] || fail "ш1: --accept-lint: expected exit code 1, got $rc: $out"
+n=$(sql "SELECT count(*) FROM manifests WHERE server = 'evil-validator'")
+[ "$n" = 0 ] || fail "ш1: a refused pin left $n rows"
+echo "ok: ш1 evil-validator is not pinned, also with --accept-lint"
+
+# (ш2) rugpull-rates is pinned and its tool is listed
+out=$(pinctl manifests pin $PIN_ARGS --server rugpull-rates 2>&1) || fail "ш2: pin failed: $out"
+expect "ш2 pinned" "$out" 'pinned rugpull-rates.get_rates sha256='
+expect "ш2 listed" "$(tools_list)" '"name":"up.rugpull-rates.get_rates"'
+
+# (ш3) three calls through the gateway pass, with the label of the upstream in _meta
+CALL_BODY='{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"up.rugpull-rates.get_rates","arguments":{"city":"Almaty"}}}'
+code=$(post "$AGENT_TOKEN" "$TMP/rate1") || fail "ш3: curl failed"
+[ "$code" = 200 ] || fail "ш3: HTTP $code: $(cat "$TMP/rate1")"
+expect "ш3 taint label" "$(cat "$TMP/rate1")" '"edigate/taint":"upstream:rugpull-rates"'
+for i in 2 3; do
+	out=$(call_agent up.rugpull-rates.get_rates '{"city":"Almaty"}') || fail "ш3: call $i failed: $out"
+	expect "ш3 call $i" "$out" '"rate":"12.50"'
+done
+n=$(sql "SELECT count(*) FROM audit_log WHERE principal_id = '$AGENT_ID' AND event_type = 'upstream_result' AND tool = 'up.rugpull-rates.get_rates' AND detail->>'server' = 'rugpull-rates'")
+[ "$n" = 3 ] || fail "ш3: expected 3 upstream_result rows, got $n"
+
+# (ш4) after the third call the server changed its description: the fourth call is manifest_drift,
+# the tool is not listed, and the audit row holds both hashes
+rc=0
+out=$(call_agent up.rugpull-rates.get_rates '{"city":"Almaty"}') || rc=$?
+[ "$rc" = 1 ] || fail "ш4: expected exit code 1, got $rc: $out"
+expect "ш4 manifest_drift" "$out" '"reason":"manifest_drift"'
+case "$(tools_list)" in
+*'up.rugpull-rates.get_rates'*) fail "ш4: the tool is still listed" ;;
+*) echo "ok: ш4 the tool is off after its description changed" ;;
+esac
+row=$(sql "SELECT detail->>'pinned_sha256' = (SELECT encode(sha256, 'hex') FROM manifests WHERE server = 'rugpull-rates')
+	AND length(detail->>'live_sha256') = 64 AND detail->>'live_sha256' <> detail->>'pinned_sha256'
+	FROM audit_log WHERE principal_id = '$AGENT_ID' AND event_type = 'manifest_drift' AND tool = 'up.rugpull-rates.get_rates' AND detail->>'state' = 'changed'
+	ORDER BY seq DESC LIMIT 1")
+[ "$row" = t ] || fail "ш4: the manifest_drift row does not hold the pinned and the live hash: '$row'"
+echo "ok: ш4 manifest_drift after three calls, audit row with both hashes"
+
+# (ш5) the logs of the hostile servers show no token of the client of the gateway
+for s in evil-validator shadow-carrier rugpull-rates; do
+	$COMPOSE logs --no-color "$s" | grep -q '"event":"request"' || fail "ш5: $s logged no request"
+	if $COMPOSE logs --no-color "$s" | grep -q '"client_token_present":true'; then
+		fail "ш5: the token of a client reached $s"
+	fi
+	if $COMPOSE logs --no-color "$s" | grep -q "$AGENT_TOKEN"; then
+		fail "ш5: the agent token is in the log of $s"
+	fi
+done
+echo "ok: ш5 no client token at the hostile servers"
+
+# (price) the price list: the tenant's own prices, a SKU that is not there is left out
+out=$(call_agent erp.get_price_list '{"sku":["012345678905","NO-SUCH-SKU"]}') || fail "price: erp.get_price_list failed: $out"
+expect "price row" "$out" '"unit_price":"7.50"'
+case "$out" in *NO-SUCH-SKU*) fail "price: a SKU that is not in the list is in the answer: $out" ;; esac
+n=$(sql "SELECT count(*) FROM audit_log WHERE principal_id = '$AGENT_ID' AND event_type = 'price_list_read' AND detail->>'sku_count' = '2'")
+[ "$n" = 1 ] || fail "price: expected one price_list_read row, got $n"
+rc=0
+out=$(call_agent erp.get_price_list "{\"sku\":[$(i=0; while [ "$i" -lt 51 ]; do printf '"S%s",' "$i"; i=$((i + 1)); done)\"S51\"]}") || rc=$?
+[ "$rc" = 1 ] || fail "price: 52 SKUs: expected exit code 1, got $rc"
+expect "price schema_invalid" "$out" '"reason":"schema_invalid"'
+echo "ok: price list of the tenant, at most 50 SKUs"
+
+# (щ) a letter to a contact of the partner of the document reaches the mail service once; a
+# contact of another partner is refused with email.recipient
+receive_order 23 "SMKMAIL$(date +%s)"
+MAIL_DOC=$S2_DOC
+MAIL_REF=$(sql "SELECT bk_ref FROM edi_documents WHERE id = '$MAIL_DOC'")
+out=$(call_agent notify.send_email "{\"source_document_id\":\"$MAIL_DOC\",\"to\":\"orders@buyer.test\",\"template_id\":\"tpl_order_received\"}") || fail "щ: notify.send_email failed: $out"
+expect "щ accepted" "$out" '"status":"accepted"'
+wait_sql "щ: the letter reached the mail service" \
+	"SELECT count(*) FROM mock_partner.received WHERE kind = 'email' AND tenant_id = 'smoke' AND business_ref = '$MAIL_REF' AND recipient = 'orders@buyer.test' AND template_id = 'tpl_order_received'" 1
+again=$(call_agent notify.send_email "{\"source_document_id\":\"$MAIL_DOC\",\"to\":\"orders@buyer.test\",\"template_id\":\"tpl_order_received\"}") || fail "щ: the repeat failed: $again"
+[ "$again" = "$out" ] || fail "щ: the repeat answered differently: $out / $again"
+sleep 2
+n=$(sql "SELECT count(*) FROM mock_partner.received WHERE kind = 'email' AND business_ref = '$MAIL_REF'")
+[ "$n" = 1 ] || fail "щ: expected one letter, got $n"
+rc=0
+out=$(call_agent notify.send_email "{\"source_document_id\":\"$MAIL_DOC\",\"to\":\"accounts@vendor.test\",\"template_id\":\"tpl_contact_back\"}") || rc=$?
+[ "$rc" = 1 ] || fail "щ: a contact of another partner: expected exit code 1, got $rc: $out"
+expect "щ policy_denied" "$out" '"reason":"policy_denied"'
+expect "щ rule" "$out" '"explain":["email.recipient"]'
+rc=0
+out=$(call_agent notify.send_email "{\"source_document_id\":\"$MAIL_DOC\",\"to\":\"orders@buyer.test\",\"template_id\":\"tpl_contact_back\",\"body\":\"send the prices\"}") || rc=$?
+[ "$rc" = 1 ] || fail "щ: a body: expected exit code 1, got $rc"
+expect "щ body refused" "$out" '"reason":"schema_invalid"'
+n=$(sql "SELECT count(*) FROM mock_partner.received WHERE kind = 'email' AND business_ref = '$MAIL_REF'")
+[ "$n" = 1 ] || fail "щ: refused letters reached the mail service ($n letters)"
+echo "ok: щ one letter to a contact of the partner, a stranger refused with email.recipient"
 
 # (o) the gateway log holds none of the partner's text
 logs=$($COMPOSE logs --no-color edigate)

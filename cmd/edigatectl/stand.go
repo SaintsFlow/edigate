@@ -22,7 +22,6 @@ import (
 )
 
 // fixturesFile is the part of bench/out/<corpus>/fixtures.json the gateway reads.
-// The mail templates in the file are not stored yet.
 type fixturesFile struct {
 	Tenant struct {
 		ID            string `json:"id"`
@@ -53,6 +52,10 @@ type fixturesFile struct {
 		Unit      string `json:"unit"`
 		UnitPrice string `json:"unit_price"`
 	} `json:"price_list"`
+	EmailTemplates []struct {
+		TemplateID string `json:"template_id"`
+		Category   string `json:"category"`
+	} `json:"email_templates"`
 }
 
 var (
@@ -60,6 +63,8 @@ var (
 	reQty   = regexp.MustCompile(`^[0-9]{1,12}(\.[0-9]{1,3})?$`)
 	reUnit  = regexp.MustCompile(`^[A-Z0-9]{2}$`)
 	reCur   = regexp.MustCompile(`^[A-Z]{3}$`)
+
+	reTemplate = regexp.MustCompile(`^tpl_[a-z_]{1,40}$`)
 )
 
 // fixturesLoad is "fixtures load <file> [--partner-tokens-out <file>]". The file may come
@@ -187,6 +192,12 @@ func (f fixturesFile) toStore() (store.Fixtures, error) {
 			return store.Fixtures{}, fmt.Errorf("bad price list row %q", p.SKU)
 		}
 		fx.Prices = append(fx.Prices, store.FixturePrice{SKU: p.SKU, Unit: p.Unit, UnitPrice: p.UnitPrice})
+	}
+	for _, t := range f.EmailTemplates {
+		if !reTemplate.MatchString(t.TemplateID) || t.Category == "" {
+			return store.Fixtures{}, fmt.Errorf("bad email template %q", t.TemplateID)
+		}
+		fx.Templates = append(fx.Templates, store.FixtureTemplate{TemplateID: t.TemplateID, Category: t.Category})
 	}
 	return fx, nil
 }

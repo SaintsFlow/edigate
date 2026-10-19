@@ -37,8 +37,18 @@ Status: work in progress, v0.1 is not released.
   transmission is repeated. A document counts as delivered only when an MDN and a 997 with AK5 `A` or `E` both came
   back; `txn.status` shows `saga_state`. The partner on the stand is partner-emulator, which answers with an MDN and a
   997 you can set to accepted, rejected, mixed, late or missing.
-- Not yet: `notify.send_email` (its rules are written and tested, the tool is not) and the tools of the upstream
-  gateway. The design is in [docs](docs).
+- Also works now: tools of other MCP servers. The gateway passes the tools of the servers in its config to the agent
+  as `up.<server>.<tool>`, but only those whose description an administrator pinned. A pin is the SHA-256 of the
+  canonical description (RFC 8785) with an ed25519 signature. Every `tools/list` and every call reads the upstream
+  again; no pin, a bad signature or a changed description switches the tool off (`manifest_drift`, an audit row with
+  both hashes). `edigatectl manifests keygen|pin|list` makes the key and the pins; `pin` refuses a description that
+  names another tool, and one that gives orders to the model unless you pass `--accept-lint`. Results carry
+  `_meta {"edigate/taint": "upstream:<server>"}`; with `quarantine_results: true` their text becomes `$up_N`
+  references. Calls need a permission in the policy data (`upstream_allow` in the config). The token of the
+  agent is never sent to an upstream. Three hostile servers of our own (`servers/adversarial`) test this on the stand.
+- Also works now: `erp.get_price_list` (the prices of your tenant, up to 50 SKUs) and `notify.send_email`, a letter
+  made from one of three templates, sent only to a contact of the partner of the order. The letter has no text of the
+  agent in it. The design is in [docs](docs).
 
 ## Try it
 
@@ -70,12 +80,20 @@ several minutes and puts the normal stand back at the end.
 The smoke test then runs a whole order: the partner sends an 850, the agent creates the order, confirms it with an
 855, reserves it and ships it, and the test waits until both sagas are `done` and partner-emulator holds one 855 and
 one 856 with different ISA13. After that it sets partner-emulator to answer with a negative 997 for the next order
-and checks that the saga is an incident and the 855 is not sent again. The stand has five services: PostgreSQL, the
-gateway and the three mocks (mock-1c on port 18081, mock-wms on 18082, partner-emulator on 18083). Partner-emulator
+and checks that the saga is an incident and the 855 is not sent again. The stand has eight services: PostgreSQL, the
+gateway, the three mocks (mock-1c on port 18081, mock-wms on 18082, partner-emulator on 18083) and the three hostile
+servers, which publish no port. Partner-emulator
 changes its behaviour while it runs: `curl -X POST http://127.0.0.1:18083/control -d '{"ack_status":"R"}'`
 (`ack_status` is `A`, `E`, `R`, `P` or `none`; the other fields are `ack_delay_ms`, `mdn_delay_ms` and `mdn_drop`).
 The call is accepted only from the machine of the stand. `edigatectl fixtures load <file> --partner-tokens-out <file>`
 gives a token to each customer partner that has none and writes the tokens in the file the emulator reads.
+
+The smoke test makes a key pair for the pins (`deploy/compose/keys`, not mounted into the gateway; the public half
+goes to the gateway through `deploy/compose/.env`), pins `rugpull-rates`, calls its tool three times, and sees
+`manifest_drift` on the fourth call because the server changed its description. It also checks that
+`evil-validator` cannot be pinned, that no token of the agent reaches the hostile servers, that a letter reaches
+the partner-emulator once, and that a letter to a contact of another partner is refused (`email.recipient`). A plain
+`make up` starts the gateway without the key: the upstream servers are then off.
 
 An operator reopens a failed order key over HTTP, not in the database:
 `edigatectl txn reopen --url http://127.0.0.1:18080 --token <operator token> <key-hex>`.

@@ -64,7 +64,7 @@ func newSagaRig(t *testing.T) *sagaRig {
 	partnerTS := httptest.NewServer(partner.Handler())
 	t.Cleanup(func() { partnerTS.Close(); partner.Close() })
 
-	effects := adapters.Mux{Onec: adapters.NewOnec(r.mockURL), WMS: adapters.NewWMS(wmsTS.URL)}
+	effects := adapters.Mux{Onec: adapters.NewOnec(r.mockURL), WMS: adapters.NewWMS(wmsTS.URL), Mail: adapters.NewMail(partnerTS.URL)}
 	r.relay.Adapter = effects
 	r.relay.AS2 = adapters.NewAS2(partnerTS.URL)
 	r.relay.MDNRepeatAfter = 30 * time.Millisecond
