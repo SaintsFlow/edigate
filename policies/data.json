@@ -1,0 +1,11 @@
+{
+  "forecast_pct": 25,
+  "tools": {
+    "erp.create_sales_order": {"tier": 1, "partner_role": "customer", "document": "850"},
+    "wms.reserve": {"tier": 1, "partner_role": "customer", "document": "850"},
+    "erp.confirm_order": {"tier": 2, "partner_role": "customer", "document": "850"},
+    "edi.send_asn": {"tier": 2, "partner_role": "customer", "document": "850"},
+    "notify.send_email": {"tier": 2, "partner_role": "customer", "document": "850"},
+    "erp.post_vendor_invoice": {"tier": 3, "partner_role": "supplier", "document": "810", "check_supplier_order": true}
+  }
+}

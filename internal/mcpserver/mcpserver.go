@@ -32,8 +32,9 @@ const (
 	readDocument = "edi.read_document"
 	extractNote  = "edi.extract_note"
 
-	createSalesOrder = tools.CreateOrderTool
-	txnStatus        = "txn.status"
+	createSalesOrder  = tools.CreateOrderTool
+	postVendorInvoice = tools.PostInvoiceTool
+	txnStatus         = "txn.status"
 )
 
 // toolRates are the own buckets of tools, per principal, on top of the general
@@ -49,6 +50,7 @@ var toolRates = map[string]struct {
 type server struct {
 	store  *store.Store
 	reader quarantine.QuarantinedReader // nil: edi.extract_note answers quarantine_invalid
+	policy tools.Decider                // decides every tool with an effect
 	log    *slog.Logger
 
 	// Schema checks; tests replace them to register tools that have no schema file yet.
@@ -66,17 +68,18 @@ type server struct {
 // edge, never from the arguments.
 type service func(ctx context.Context, id edge.Identity, args json.RawMessage) (any, error)
 
-func newServer(st *store.Store, reader quarantine.QuarantinedReader, log *slog.Logger) *server {
+func newServer(st *store.Store, reader quarantine.QuarantinedReader, dec tools.Decider, log *slog.Logger) *server {
 	return &server{
-		store: st, reader: reader, log: log, limiters: map[string]*rate.Limiter{},
+		store: st, reader: reader, policy: dec, log: log, limiters: map[string]*rate.Limiter{},
 		validateIn: contracts.Validate, validateOut: contracts.ValidateOutput,
 	}
 }
 
 // New builds the MCP server with all tools registered. reader is the
-// quarantined reader behind edi.extract_note; nil switches that tool off.
-func New(st *store.Store, reader quarantine.QuarantinedReader, log *slog.Logger) *mcp.Server {
-	s := newServer(st, reader, log)
+// quarantined reader behind edi.extract_note; nil switches that tool off. dec is
+// the policy that decides the tools with an effect.
+func New(st *store.Store, reader quarantine.QuarantinedReader, dec tools.Decider, log *slog.Logger) *mcp.Server {
+	s := newServer(st, reader, dec, log)
 	srv := mcp.NewServer(&mcp.Implementation{Name: "edigate", Version: "0.1.0-dev"}, nil)
 	s.add(srv, listInbox, "List the documents in the tenant's inbox.",
 		func(ctx context.Context, id edge.Identity, args json.RawMessage) (any, error) {
@@ -113,13 +116,27 @@ func New(st *store.Store, reader quarantine.QuarantinedReader, log *slog.Logger)
 	s.add(srv, createSalesOrder, "Create a sales order in the ERP from a received purchase order (850). Pass the "+
 		"document id and, if the partner asked for one, a delivery instruction from the fixed list. Prices, partner "+
 		"and quantities are taken by the gateway from the document and the price list. Calling again for the same "+
-		"order returns the same txn_id and creates nothing new. Use txn.status with the txn_id to follow the order.",
+		"order returns the same txn_id and creates nothing new. An order above the limits of the partner is not "+
+		"refused: the answer is pending_approval with an approval_id, and an operator decides. Use txn.status "+
+		"with the txn_id to follow the order.",
 		func(ctx context.Context, id edge.Identity, args json.RawMessage) (any, error) {
 			var in tools.CreateSalesOrderInput
 			if err := json.Unmarshal(args, &in); err != nil {
 				return nil, rpcerr.New(rpcerr.SchemaInvalid, "")
 			}
-			return tools.CreateSalesOrder(ctx, st, tools.Caller{TenantID: id.TenantID, PrincipalID: id.PrincipalID, TraceID: id.TraceID}, in)
+			return tools.CreateSalesOrder(ctx, st, dec, callerOf(id), in)
+		})
+	s.add(srv, postVendorInvoice, "Book a supplier invoice in the ERP from a received invoice (810). Pass the "+
+		"document id. The amount and the lines are taken by the gateway from the document and checked against "+
+		"the order to the supplier. An invoice always waits for two different operators: the answer is "+
+		"pending_approval with an approval_id. Calling again for the same invoice returns the same txn_id. "+
+		"Use txn.status with the txn_id to follow it.",
+		func(ctx context.Context, id edge.Identity, args json.RawMessage) (any, error) {
+			var in tools.PostVendorInvoiceInput
+			if err := json.Unmarshal(args, &in); err != nil {
+				return nil, rpcerr.New(rpcerr.SchemaInvalid, "")
+			}
+			return tools.PostVendorInvoice(ctx, st, dec, callerOf(id), in)
 		})
 	s.add(srv, txnStatus, "Show where a transaction stands: accepted (queued), completed (the effect is confirmed, "+
 		"with the reference of the other system) or rejected.",
@@ -131,6 +148,10 @@ func New(st *store.Store, reader quarantine.QuarantinedReader, log *slog.Logger)
 			return tools.TxnStatus(ctx, st, id.TenantID, in)
 		})
 	return srv
+}
+
+func callerOf(id edge.Identity) tools.Caller {
+	return tools.Caller{TenantID: id.TenantID, PrincipalID: id.PrincipalID, Kind: id.Kind, TraceID: id.TraceID}
 }
 
 // add registers a raw tool handler (not the typed mcp.AddTool) so that our own

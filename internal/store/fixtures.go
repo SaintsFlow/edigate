@@ -1,6 +1,9 @@
 package store
 
-import "context"
+import (
+	"context"
+	"encoding/json"
+)
 
 // Fixtures is the starting data of a stand: one tenant, its partners with limits,
 // contacts and ship-to codes, and the price list. Amounts are decimal strings.
@@ -19,8 +22,25 @@ type FixturePartner struct {
 	Name          string
 	AutoMaxAmount string
 	DailyAutoMax  string
-	Contacts      []string
-	ShipToCodes   []string
+	// ForecastAmount is the expected order amount; empty means the same as AutoMaxAmount.
+	ForecastAmount string
+	Contacts       []string
+	ShipToCodes    []string
+	SupplierOrders []FixtureSupplierOrder
+}
+
+// FixtureSupplierOrder is an order to a supplier that an invoice is checked against.
+type FixtureSupplierOrder struct {
+	OrderNumber string
+	Total       string
+	Lines       []FixtureSupplierLine
+}
+
+// FixtureSupplierLine is a line of such an order; Qty and UnitPrice are decimal strings.
+type FixtureSupplierLine struct {
+	SKU       string `json:"sku"`
+	Qty       string `json:"qty"`
+	UnitPrice string `json:"unit_price"`
 }
 
 // FixturePrice is a row of the price list.
@@ -48,12 +68,14 @@ func (s *Store) LoadFixtures(ctx context.Context, f Fixtures) error {
 	}
 	for _, p := range f.Partners {
 		if _, err := tx.Exec(ctx,
-			`INSERT INTO partners (tenant_id, partner_id, role, name, auto_max_amount, daily_auto_max, currency)
-			 VALUES ($1, $2, $3, $4, NULLIF($5, '')::numeric, NULLIF($6, '')::numeric, $7)
+			`INSERT INTO partners (tenant_id, partner_id, role, name, auto_max_amount, daily_auto_max, currency, forecast_amount)
+			 VALUES ($1, $2, $3, $4, NULLIF($5, '')::numeric, NULLIF($6, '')::numeric, $7,
+			         COALESCE(NULLIF($8, '')::numeric, NULLIF($5, '')::numeric))
 			 ON CONFLICT (tenant_id, partner_id) DO UPDATE
 			   SET role = EXCLUDED.role, name = EXCLUDED.name, auto_max_amount = EXCLUDED.auto_max_amount,
-			       daily_auto_max = EXCLUDED.daily_auto_max, currency = EXCLUDED.currency`,
-			f.TenantID, p.PartnerID, p.Role, p.Name, p.AutoMaxAmount, p.DailyAutoMax, f.Currency); err != nil {
+			       daily_auto_max = EXCLUDED.daily_auto_max, currency = EXCLUDED.currency,
+			       forecast_amount = EXCLUDED.forecast_amount`,
+			f.TenantID, p.PartnerID, p.Role, p.Name, p.AutoMaxAmount, p.DailyAutoMax, f.Currency, p.ForecastAmount); err != nil {
 			return err
 		}
 		for _, email := range p.Contacts {
@@ -67,6 +89,20 @@ func (s *Store) LoadFixtures(ctx context.Context, f Fixtures) error {
 			if _, err := tx.Exec(ctx,
 				`INSERT INTO partner_ship_to (tenant_id, partner_id, code) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`,
 				f.TenantID, p.PartnerID, code); err != nil {
+				return err
+			}
+		}
+		for _, o := range p.SupplierOrders {
+			lines, err := json.Marshal(o.Lines)
+			if err != nil {
+				return err
+			}
+			if _, err := tx.Exec(ctx,
+				`INSERT INTO supplier_orders (tenant_id, partner_id, order_number, lines, total, currency)
+				 VALUES ($1, $2, $3, $4, $5::numeric, $6)
+				 ON CONFLICT (tenant_id, partner_id, order_number) DO UPDATE
+				   SET lines = EXCLUDED.lines, total = EXCLUDED.total, currency = EXCLUDED.currency`,
+				f.TenantID, p.PartnerID, o.OrderNumber, lines, o.Total, f.Currency); err != nil {
 				return err
 			}
 		}

@@ -4,8 +4,9 @@
   "additionalProperties": false,
   "required": ["status", "txn_id"],
   "properties": {
-    "status": { "enum": ["accepted", "rejected"] },
+    "status": { "enum": ["accepted", "pending_approval", "rejected", "expired"] },
     "txn_id": { "type": "string" },
-    "reason": { "enum": ["adapter_rejected", "dead"] }
+    "approval_id": { "type": "string" },
+    "reason": { "enum": ["adapter_rejected", "dead", "approval_rejected"] }
   }
 }

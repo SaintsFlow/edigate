@@ -89,7 +89,7 @@ func (r *Relay) Step(ctx context.Context) (bool, error) {
 		Type: claim.Row.EffectType, TenantID: claim.Row.TenantID,
 		ExternalID: hex.EncodeToString(claim.Row.Key), Payload: claim.Row.Payload,
 	}
-	found, ref, err := r.Adapter.Exists(ctx, e.ExternalID)
+	found, ref, err := r.Adapter.Exists(ctx, e.Type, e.ExternalID)
 	if err == nil && !found {
 		ref, err = r.Adapter.Apply(ctx, e)
 		if err == nil {

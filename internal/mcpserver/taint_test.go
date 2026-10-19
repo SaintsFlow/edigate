@@ -27,7 +27,7 @@ func TestT_TAINT_01_NoteReferenceNeverReachesASink(t *testing.T) {
 	if err := st.AddTenant(ctx, "tenant-a", "Tenant A", ""); err != nil {
 		t.Fatal(err)
 	}
-	s := newServer(st, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	s := newServer(st, nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	// The sinks of the later waves have no schema files yet: accept any object.
 	s.validateIn = func(string, []byte) error { return nil }
 	s.validateOut = func(string, []byte) error { return nil }

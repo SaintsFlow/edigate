@@ -23,11 +23,13 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/SaintsFlow/edigate/internal/adapters"
+	"github.com/SaintsFlow/edigate/internal/approval"
 	"github.com/SaintsFlow/edigate/internal/config"
 	"github.com/SaintsFlow/edigate/internal/edge"
 	"github.com/SaintsFlow/edigate/internal/inbound"
 	"github.com/SaintsFlow/edigate/internal/mcpserver"
 	"github.com/SaintsFlow/edigate/internal/ops"
+	"github.com/SaintsFlow/edigate/internal/policy"
 	"github.com/SaintsFlow/edigate/internal/quarantine"
 	"github.com/SaintsFlow/edigate/internal/store"
 	"github.com/SaintsFlow/edigate/internal/txn"
@@ -65,7 +67,13 @@ func run() error {
 	}
 
 	reader := quarantine.NewReader(quarantine.NewHTTPCompleter(cfg.QuarantineBaseURL, cfg.QuarantineAPIKey), cfg.QuarantineModel, st)
-	mcpServer := mcpserver.New(st, reader, log)
+	engine, err := policy.New(ctx)
+	if err != nil {
+		return err
+	}
+	st.SetApprovalTTL(approval.TTL(cfg.TimeScale))
+	go approval.Run(ctx, st, log)
+	mcpServer := mcpserver.New(st, reader, engine, log)
 	sdk := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return mcpServer },
 		&mcp.StreamableHTTPOptions{Stateless: true, JSONResponse: true})
 

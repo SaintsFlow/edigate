@@ -5,7 +5,6 @@ package txn_test
 // the tests step by hand, so that every test controls when a delivery happens.
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -16,6 +15,7 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -29,8 +29,10 @@ import (
 	"github.com/SaintsFlow/edigate/internal/inbound"
 	"github.com/SaintsFlow/edigate/internal/mcpserver"
 	"github.com/SaintsFlow/edigate/internal/ops"
+	"github.com/SaintsFlow/edigate/internal/policy"
 	"github.com/SaintsFlow/edigate/internal/store"
 	"github.com/SaintsFlow/edigate/internal/store/storetest"
+	"github.com/SaintsFlow/edigate/internal/tools"
 	"github.com/SaintsFlow/edigate/internal/txn"
 	onecserver "github.com/SaintsFlow/edigate/mocks/onec/server"
 )
@@ -45,7 +47,24 @@ type rig struct {
 	url   string // the gateway
 	mock  *onecserver.Server
 	relay *txn.Relay
+	rec   *recorder // sits in front of the policy and keeps what it was asked
 	seq   atomic.Int64
+}
+
+// recorder is a Decider that remembers every call and passes it to the real policy.
+type recorder struct {
+	inner tools.Decider
+	mu    sync.Mutex
+	calls []policy.ToolCall
+	who   []policy.Principal
+}
+
+func (c *recorder) Decide(ctx context.Context, p policy.Principal, call policy.ToolCall) (policy.Decision, error) {
+	c.mu.Lock()
+	c.calls = append(c.calls, call)
+	c.who = append(c.who, p)
+	c.mu.Unlock()
+	return c.inner.Decide(ctx, p, call)
 }
 
 func newRig(t *testing.T) *rig {
@@ -66,7 +85,10 @@ func newRig(t *testing.T) *rig {
 
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	gate := edge.NewGate(ctx, st, log)
-	srv := mcpserver.New(st, nil, log)
+	engine, err := policy.New(ctx)
+	r.must(err)
+	r.rec = &recorder{inner: engine}
+	srv := mcpserver.New(st, nil, r.rec, log)
 	sdk := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return srv },
 		&mcp.StreamableHTTPOptions{Stateless: true, JSONResponse: true})
 	mux := http.NewServeMux()
@@ -125,8 +147,18 @@ func (r *rig) partner(tenant string) (id, token string) {
 	r.t.Helper()
 	id = "ZZ:ZZTESTBUYER"
 	r.must(r.st.AddPartner(context.Background(), store.Partner{TenantID: tenant, PartnerID: id, Role: "customer", Name: id}))
+	r.exec(`UPDATE partners SET auto_max_amount = 5000, daily_auto_max = 50000, forecast_amount = 5000
+	        WHERE tenant_id = $1 AND partner_id = $2`, tenant, id)
+	r.exec(`INSERT INTO partner_ship_to (tenant_id, partner_id, code) VALUES ($1, $2, 'DC01')`, tenant, id)
 	_, token = r.token(tenant, "partner", id)
 	return id, token
+}
+
+// limits sets the limits of a partner in currency units.
+func (r *rig) limits(tenant, partnerID string, perDocument, perDay int) {
+	r.t.Helper()
+	r.exec(`UPDATE partners SET auto_max_amount = $3, daily_auto_max = $4 WHERE tenant_id = $1 AND partner_id = $2`,
+		tenant, partnerID, perDocument, perDay)
 }
 
 type orderLine struct{ sku, qty, price string }
@@ -134,6 +166,12 @@ type orderLine struct{ sku, qty, price string }
 // send850 posts an order of the partner in a new interchange and returns the id
 // of the stored document. gs06 and isa13 are the numbers of the exchange.
 func (r *rig) send850(tenant, partnerID, token, isa13, gs06, beg03 string, lines ...orderLine) string {
+	r.t.Helper()
+	return r.send850x(tenant, partnerID, token, isa13, gs06, beg03, "", lines...)
+}
+
+// send850x is send850 with extra segments (for example free text) after the last line.
+func (r *rig) send850x(tenant, partnerID, token, isa13, gs06, beg03, extra string, lines ...orderLine) string {
 	r.t.Helper()
 	pad := func(id string) string {
 		name := strings.TrimPrefix(id, "ZZ:")
@@ -143,24 +181,15 @@ func (r *rig) send850(tenant, partnerID, token, isa13, gs06, beg03 string, lines
 	for i, l := range lines {
 		body += fmt.Sprintf("PO1*%d*%s*EA*%s**VN*%s~", i+1, l.qty, l.price, l.sku)
 	}
+	body += extra
 	body += "CTT*" + strconv.Itoa(len(lines)) + "~"
 	segments := strings.Count(body, "~") + 2
 	raw := "ISA*00*          *00*          *ZZ*" + pad(partnerID) + "*ZZ*" + pad(gateways[tenant]) + "*261018*1200*U*00401*" + isa13 + "*0*T*>~" +
 		"GS*PO*" + strings.TrimPrefix(partnerID, "ZZ:") + "*" + strings.TrimPrefix(gateways[tenant], "ZZ:") + "*20261018*1200*" + gs06 + "*X*004010~" +
 		"ST*850*0001~" + body + "SE*" + strconv.Itoa(segments) + "*0001~GE*1*" + gs06 + "~IEA*1*" + isa13 + "~"
 
-	req, err := http.NewRequest(http.MethodPost, r.url+"/edi/inbound", bytes.NewReader([]byte(raw)))
-	r.must(err)
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("AS2-From", partnerID)
-	req.Header.Set("AS2-To", gateways[tenant])
-	req.Header.Set("Message-Id", "<"+isa13+"@test>")
-	resp, err := http.DefaultClient.Do(req)
-	r.must(err)
-	defer resp.Body.Close()
-	answer, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusOK {
-		r.t.Fatalf("send 850: HTTP %d: %s", resp.StatusCode, answer)
+	if code, answer := r.postInbound(raw, tenant, partnerID, token, isa13); code != http.StatusOK {
+		r.t.Fatalf("send 850: HTTP %d: %s", code, answer)
 	}
 	return r.text(`SELECT d.id::text FROM edi_documents d JOIN edi_interchanges i ON i.id = d.interchange_id
 	               WHERE d.tenant_id = $1 AND i.isa13 = $2 AND i.counterparty_id = $3`, tenant, isa13, partnerID)
@@ -225,9 +254,10 @@ func (r *rig) order(cs *mcp.ClientSession, docID string, extra ...string) (answe
 }
 
 type answer struct {
-	Status string `json:"status"`
-	TxnID  string `json:"txn_id"`
-	Reason string `json:"reason"`
+	Status     string `json:"status"`
+	TxnID      string `json:"txn_id"`
+	Reason     string `json:"reason"`
+	ApprovalID string `json:"approval_id"`
 }
 
 func reasonOf(w *jsonrpc.Error) string {

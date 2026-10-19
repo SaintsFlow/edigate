@@ -44,6 +44,18 @@ CREATE TABLE IF NOT EXISTS mock_onec.sales_orders (
     currency     char(3) NOT NULL,
     status       text NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'cancelled')),
     created_at   timestamptz NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS mock_onec.vendor_invoices (
+    id             bigserial PRIMARY KEY,
+    tenant_id      text NOT NULL,
+    external_id    text NULL UNIQUE,
+    partner_id     text NOT NULL,
+    invoice_number text NOT NULL,
+    order_ref      text NOT NULL DEFAULT '',
+    lines          jsonb NOT NULL,
+    total          numeric(18, 2) NOT NULL,
+    currency       char(3) NOT NULL,
+    created_at     timestamptz NOT NULL DEFAULT now()
 );`
 
 // Migrate creates the schema and the table of the mock if they are missing.
@@ -94,6 +106,8 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /hs/orders", s.create)
 	mux.HandleFunc("GET /hs/orders", s.lookup)
+	mux.HandleFunc("POST /hs/vendor-invoices", s.createInvoice)
+	mux.HandleFunc("GET /hs/vendor-invoices", s.lookupInvoice)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		if err := s.pool.Ping(r.Context()); err != nil {
 			reply(w, http.StatusServiceUnavailable, map[string]string{"error": "database unavailable"})

@@ -25,6 +25,7 @@ import (
 	"github.com/SaintsFlow/edigate/internal/edge"
 	"github.com/SaintsFlow/edigate/internal/inbound"
 	"github.com/SaintsFlow/edigate/internal/mcpserver"
+	"github.com/SaintsFlow/edigate/internal/policy"
 	"github.com/SaintsFlow/edigate/internal/quarantine"
 	"github.com/SaintsFlow/edigate/internal/store"
 	"github.com/SaintsFlow/edigate/internal/store/storetest"
@@ -56,7 +57,9 @@ func newRig(t *testing.T) *rig {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	gate := edge.NewGate(ctx, st, log)
 	r.reader = quarantine.NewReader(r.fake, "fake-model", st)
-	mcpServer := mcpserver.New(st, r.reader, log) // one server: it holds the buckets of the tools
+	engine, err := policy.New(ctx)
+	r.must(err)
+	mcpServer := mcpserver.New(st, r.reader, engine, log) // one server: it holds the buckets of the tools
 	sdk := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return mcpServer },
 		&mcp.StreamableHTTPOptions{Stateless: true, JSONResponse: true})
 	mux := http.NewServeMux()

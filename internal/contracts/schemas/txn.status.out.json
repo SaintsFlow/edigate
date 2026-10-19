@@ -5,7 +5,7 @@
   "required": ["txn_id", "status", "external_ref"],
   "properties": {
     "txn_id": { "type": "string" },
-    "status": { "enum": ["accepted", "completed", "rejected"] },
+    "status": { "enum": ["accepted", "pending_approval", "completed", "rejected", "expired"] },
     "external_ref": { "type": ["string", "null"] }
   }
 }

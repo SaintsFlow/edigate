@@ -104,3 +104,52 @@ func TestMockOnecFaultKnobs(t *testing.T) {
 		t.Errorf("refused prefix: HTTP %d, orders %d", code, count())
 	}
 }
+
+const invoice = `{"tenant_id":"ta","external_id":"EXT","partner_id":"ZZ:SUP","invoice_number":"INV-1","order_ref":"SPO-1",` +
+	`"lines":[{"sku":"A","qty":"10.000","unit":"EA","unit_price":"3.00"}],"total":"30.00","currency":"USD"}`
+
+// Supplier invoices are received the same way as orders: once per external id, 201
+// then 200, a lookup by external id, a refusal for a bad body, and the reject knob.
+func TestMockOnecVendorInvoices(t *testing.T) {
+	_, pool := storetest.New(t)
+	ctx := context.Background()
+	if err := server.Migrate(ctx, pool); err != nil {
+		t.Fatal(err)
+	}
+	s := server.New(pool, server.Config{})
+	ts := httptest.NewServer(s.Handler())
+	defer ts.Close()
+	count := func() (n int) {
+		_ = pool.QueryRow(ctx, `SELECT count(*) FROM mock_onec.vendor_invoices`).Scan(&n)
+		return n
+	}
+
+	if code, _ := do(t, "GET", ts.URL+"/hs/vendor-invoices?external_id=EXT", ""); code != 404 {
+		t.Errorf("lookup of nothing: %d", code)
+	}
+	code, first := do(t, "POST", ts.URL+"/hs/vendor-invoices", invoice)
+	if code != 201 {
+		t.Fatalf("first post: %d %s", code, first)
+	}
+	code, second := do(t, "POST", ts.URL+"/hs/vendor-invoices", invoice)
+	var a, b struct{ ID int64 }
+	_ = json.Unmarshal([]byte(first), &a)
+	_ = json.Unmarshal([]byte(second), &b)
+	if code != 200 || a.ID == 0 || a.ID != b.ID || count() != 1 {
+		t.Fatalf("second post: %d %s (invoices %d)", code, second, count())
+	}
+	if code, body := do(t, "GET", ts.URL+"/hs/vendor-invoices?external_id=EXT", ""); code != 200 || !strings.Contains(body, `"total":"30.00"`) || !strings.Contains(body, `"order_ref":"SPO-1"`) {
+		t.Errorf("lookup: %d %s", code, body)
+	}
+	if code, _ := do(t, "POST", ts.URL+"/hs/vendor-invoices", `{"tenant_id":"ta"}`); code != 400 {
+		t.Errorf("a bad invoice: %d, want 400", code)
+	}
+	if code, _ := do(t, "GET", ts.URL+"/hs/vendor-invoices", ""); code != 400 {
+		t.Errorf("a lookup without an external id: %d, want 400", code)
+	}
+	s.SetRejectRefPrefix("INV-9")
+	refused := strings.Replace(strings.Replace(invoice, `"INV-1"`, `"INV-9X"`, 1), `"EXT"`, `"EXT2"`, 1)
+	if code, _ := do(t, "POST", ts.URL+"/hs/vendor-invoices", refused); code != 422 || count() != 1 {
+		t.Errorf("a refused invoice: %d (invoices %d), want 422 and 1", code, count())
+	}
+}

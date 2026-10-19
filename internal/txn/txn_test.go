@@ -535,7 +535,9 @@ func (f *failing) Apply(context.Context, adapters.Effect) (string, error) {
 	return "", &adapters.StatusError{Code: 503}
 }
 
-func (f *failing) Exists(context.Context, string) (bool, string, error) { return false, "", nil }
+func (f *failing) Exists(context.Context, string, string) (bool, string, error) {
+	return false, "", nil
+}
 
 // A temporary fault is retried eight times, the ninth failure makes the row dead
 // and the key failed with reason "dead".

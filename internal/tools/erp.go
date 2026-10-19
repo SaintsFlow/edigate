@@ -7,6 +7,7 @@ import (
 	"fmt"
 
 	"github.com/SaintsFlow/edigate/internal/edi/document"
+	"github.com/SaintsFlow/edigate/internal/policy"
 	"github.com/SaintsFlow/edigate/internal/rpcerr"
 	"github.com/SaintsFlow/edigate/internal/store"
 	"github.com/SaintsFlow/edigate/internal/txn"
@@ -22,13 +23,6 @@ const CreateOrderTool = "erp.create_sales_order"
 // effectCreateOrder is the outbox effect type the relay delivers to mock-1c.
 const effectCreateOrder = "onec.create_order"
 
-// Caller is the identity a tool call runs under, taken from the edge.
-type Caller struct {
-	TenantID    string
-	PrincipalID string
-	TraceID     string
-}
-
 // CreateSalesOrderInput is the validated input of erp.create_sales_order. The
 // agent passes a reference to the document and a closed value: no price, partner,
 // address or quantity.
@@ -37,12 +31,15 @@ type CreateSalesOrderInput struct {
 	DeliveryInstruction string `json:"delivery_instruction,omitempty"`
 }
 
-// OrderResult is the answer of erp.create_sales_order. Reason is set for a
-// rejected order only (the recorded outcome of a failed key).
+// OrderResult is the answer of the tools with an effect (erp.create_sales_order,
+// erp.post_vendor_invoice). Status is accepted (queued), pending_approval (with
+// ApprovalID), or for a failed key rejected or expired. Reason is set for a
+// rejected one only (the recorded outcome of a failed key).
 type OrderResult struct {
-	Status string `json:"status"`
-	TxnID  string `json:"txn_id"`
-	Reason string `json:"reason,omitempty"`
+	Status     string `json:"status"`
+	TxnID      string `json:"txn_id"`
+	Reason     string `json:"reason,omitempty"`
+	ApprovalID string `json:"approval_id,omitempty"`
 }
 
 // CreateSalesOrder turns a received 850 into an order in the ERP, at most once per
@@ -51,12 +48,14 @@ type OrderResult struct {
 // The document must be an 850 of the tenant in the status received or processed
 // (otherwise not_found). Every line is priced from the price list; a SKU that is
 // not in the list or is a note reference gives policy_denied with
-// explain ["unknown_sku"]. The key, the request hash, the outbox row and the audit
-// row are written in one transaction (store.Reserve). A call that repeats an
-// earlier one gets the same txn_id; the same business key with a different
-// request gives conflicting_duplicate.
-func CreateSalesOrder(ctx context.Context, st *store.Store, c Caller, in CreateSalesOrderInput) (OrderResult, error) {
-	src, err := st.OrderSource(ctx, c.TenantID, in.SourceDocumentID)
+// explain ["unknown_sku"]. Then the policy decides (internal/policy): refused
+// (policy_denied with the rule names), queued, or waiting for one operator. The
+// key, the request hash, the outbox row or the approval request, and the audit row
+// are written in one transaction (store.Reserve). A call that repeats an earlier
+// one gets the same txn_id; the same business key with a different request gives
+// conflicting_duplicate.
+func CreateSalesOrder(ctx context.Context, st *store.Store, dec Decider, c Caller, in CreateSalesOrderInput) (OrderResult, error) {
+	src, err := st.OrderSource(ctx, c.TenantID, in.SourceDocumentID, "850")
 	if errors.Is(err, store.ErrNotFound) {
 		return OrderResult{}, rpcerr.New(rpcerr.NotFound, "")
 	}
@@ -87,7 +86,6 @@ func CreateSalesOrder(ctx context.Context, st *store.Store, c Caller, in CreateS
 		return OrderResult{}, err
 	}
 
-	key := txn.Key(c.TenantID, CreateOrderTool, src.PartnerID, src.BKRef)
 	businessKey, err := txn.BusinessKeyJSON(src.PartnerID, src.BKRef)
 	if err != nil {
 		return OrderResult{}, err
@@ -100,18 +98,28 @@ func CreateSalesOrder(ctx context.Context, st *store.Store, c Caller, in CreateS
 	if err != nil {
 		return OrderResult{}, err
 	}
-	res, err := st.Reserve(ctx, store.ReserveInput{
-		TenantID: c.TenantID, Tool: CreateOrderTool, PrincipalID: c.PrincipalID, TraceID: c.TraceID,
-		DocumentID: src.ID, Key: key[:], BusinessKey: businessKey, ReqHash: reqHash,
-		EffectType: effectCreateOrder, Payload: rawPayload,
+	amount, _ := policy.Cents(payload.Total) // the total is built by BuildOrder: digits with two places
+	// What the operator may see: values of the typed body (a value that failed its
+	// format is a note reference there) and of the price list. BusinessRef of the
+	// payload is the raw BEG03, which is partner text, so the body's value is used.
+	view := map[string]any{
+		"partner_id": src.PartnerID, "document_number": h.BusinessRef, "ship_to": deref(h.ShipTo),
+		"lines": payload.Lines, "total": payload.Total, "currency": payload.Currency,
+		"delivery_instruction": payload.DeliveryInstruction,
+	}
+	return reserveEffect(ctx, st, dec, c, effectRequest{
+		Tool: CreateOrderTool, EffectType: effectCreateOrder, Src: src, ST01: "850",
+		Effect: payload, AmountCents: amount, Counted: true, ViewArgs: view,
+		Key: txn.Key(c.TenantID, CreateOrderTool, src.PartnerID, src.BKRef), BusinessKey: businessKey,
+		ReqHash: reqHash, Payload: rawPayload,
 	})
-	if err != nil {
-		return OrderResult{}, err
+}
+
+func deref(s *string) string {
+	if s == nil {
+		return ""
 	}
-	if res.Outcome == store.ReservedConflict {
-		return OrderResult{}, rpcerr.New(rpcerr.ConflictingDuplicate, "")
-	}
-	return OrderResult{Status: res.Status, TxnID: res.TxnID, Reason: res.Reason}, nil
+	return *s
 }
 
 // TxnStatusInput is the validated input of txn.status.
@@ -142,10 +150,18 @@ func TxnStatus(ctx context.Context, st *store.Store, tenantID string, in TxnStat
 	switch t.State {
 	case "completed":
 		out.Status = "completed"
-	case "failed", "reopened":
+	case "failed":
+		out.Status = "rejected"
+		if t.ResultStatus == "expired" {
+			out.Status = "expired"
+		}
+	case "reopened":
 		out.Status = "rejected"
 	default:
 		out.Status = "accepted"
+		if t.ResultStatus == "pending_approval" {
+			out.Status = "pending_approval"
+		}
 	}
 	if t.ExternalRef != "" {
 		out.ExternalRef = &t.ExternalRef

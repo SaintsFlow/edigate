@@ -15,8 +15,24 @@ import (
 // Timeout of one request to the ERP.
 const onecTimeout = 15 * time.Second
 
-// Onec is the client of the 1C HTTP service (here: mock-1c). It sends orders to
-// POST /hs/orders and looks them up with GET /hs/orders?external_id=.
+// routes maps the effect type to the path of the 1C HTTP service. An effect type
+// that is not here is refused for good.
+var routes = map[string]string{
+	"onec.create_order":        "/hs/orders",
+	"onec.post_vendor_invoice": "/hs/vendor-invoices",
+}
+
+func route(effectType string) (string, error) {
+	p, ok := routes[effectType]
+	if !ok {
+		return "", &StatusError{Code: http.StatusBadRequest}
+	}
+	return p, nil
+}
+
+// Onec is the client of the 1C HTTP service (here: mock-1c). It sends an effect to
+// POST <path> and looks it up with GET <path>?external_id=, where the path depends
+// on the effect type (orders and supplier invoices).
 type Onec struct {
 	base string
 	http *http.Client
@@ -50,7 +66,11 @@ func (o *Onec) Apply(ctx context.Context, e Effect) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, o.base+"/hs/orders", bytes.NewReader(raw))
+	path, err := route(e.Type)
+	if err != nil {
+		return "", err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, o.base+path, bytes.NewReader(raw))
 	if err != nil {
 		return "", err
 	}
@@ -65,9 +85,14 @@ func (o *Onec) Apply(ctx context.Context, e Effect) (string, error) {
 	return refOf(answer)
 }
 
-// Exists asks mock-1c for the order with this external id: 200 is a yes, 404 a no.
-func (o *Onec) Exists(ctx context.Context, externalID string) (bool, string, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, o.base+"/hs/orders?external_id="+url.QueryEscape(externalID), nil)
+// Exists asks mock-1c for the effect of this type with this external id: 200 is a
+// yes, 404 a no.
+func (o *Onec) Exists(ctx context.Context, effectType, externalID string) (bool, string, error) {
+	path, err := route(effectType)
+	if err != nil {
+		return false, "", err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, o.base+path+"?external_id="+url.QueryEscape(externalID), nil)
 	if err != nil {
 		return false, "", err
 	}

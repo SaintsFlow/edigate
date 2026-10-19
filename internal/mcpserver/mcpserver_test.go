@@ -15,6 +15,7 @@ import (
 
 	"github.com/SaintsFlow/edigate/internal/edge"
 	"github.com/SaintsFlow/edigate/internal/mcpserver"
+	"github.com/SaintsFlow/edigate/internal/policy"
 	"github.com/SaintsFlow/edigate/internal/store"
 	"github.com/SaintsFlow/edigate/internal/store/storetest"
 )
@@ -51,7 +52,11 @@ func TestListInboxEndToEnd(t *testing.T) {
 	}
 
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	srv := mcpserver.New(st, nil, log)
+	engine, err := policy.New(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := mcpserver.New(st, nil, engine, log)
 	sdk := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return srv },
 		&mcp.StreamableHTTPOptions{Stateless: true, JSONResponse: true})
 	ts := httptest.NewServer(edge.NewGate(ctx, st, log).MCP(sdk))

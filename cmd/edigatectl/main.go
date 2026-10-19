@@ -9,6 +9,7 @@
 //	edigatectl send --url URL --token T --from Q:ID --to Q:ID --file F [--message-id ID]
 //	edigatectl fixtures load <fixtures.json>
 //	edigatectl txn reopen --url URL --token OPERATOR_TOKEN <key-hex>
+//	edigatectl approvals list|approve|reject --url URL --token OPERATOR_TOKEN [--status S] [id]
 //
 // tenant, partner, token and fixtures commands work on the database directly
 // (EDIGATE_DB_URL): they are setup done on the gateway machine, not a network
@@ -18,7 +19,10 @@
 // "fixtures load" reads the file of the corpus generator (tenant, partners with
 // limits, price list) and is safe to run again. "txn reopen" is an operator
 // action and goes over HTTP to /ops/ of the gateway at URL (for example
-// http://127.0.0.1:18080), so the audit log knows the operator.
+// http://127.0.0.1:18080), so the audit log knows the operator. "approvals" lists
+// the approval requests of the operator's tenant and approves or rejects one; a
+// request that needs two operators stays pending until a second, different
+// operator token approves it.
 // Exit codes: 0 ok, 1 failed (for call: the server answered with a JSON-RPC
 // error; for parse: something was rejected; for send and txn reopen: the answer
 // was not 200), 2 wrong command line.
@@ -56,6 +60,7 @@ const usage = `usage:
   edigatectl send --url URL --token T --from Q:ID --to Q:ID --file F [--message-id ID]
   edigatectl fixtures load <fixtures.json>
   edigatectl txn reopen --url URL --token OPERATOR_TOKEN <key-hex>
+  edigatectl approvals list|approve|reject --url URL --token OPERATOR_TOKEN [--status S] [id]
 `
 
 // qualifiedID is ISA05:ISA06 or ISA07:ISA08: a two-character qualifier and an
@@ -110,6 +115,8 @@ func run(ctx context.Context, args []string, stdout io.Writer) error {
 			return txnReopen(ctx, args[2:], stdout)
 		}
 		return usageError{"txn: expected: reopen --url URL --token T <key-hex>"}
+	case "approvals":
+		return approvals(ctx, args[1:], stdout)
 	case "token":
 		if len(args) < 2 {
 			return usageError{"token: expected issue or revoke"}

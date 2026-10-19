@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -32,6 +33,23 @@ var ErrNotMigrated = errors.New("database migrations are not applied")
 // Store is the gateway's access to PostgreSQL.
 type Store struct {
 	pool *pgxpool.Pool
+
+	// approvalTTL is how long an approval request stays open (SetApprovalTTL).
+	approvalTTL time.Duration
+}
+
+// DefaultApprovalTTL is the life of an approval request at time scale 1.
+const DefaultApprovalTTL = 30 * time.Minute
+
+// SetApprovalTTL sets how long new approval requests stay open. It is called once
+// at start, before the store is shared.
+func (s *Store) SetApprovalTTL(d time.Duration) { s.approvalTTL = d }
+
+func (s *Store) ttl() time.Duration {
+	if s.approvalTTL <= 0 {
+		return DefaultApprovalTTL
+	}
+	return s.approvalTTL
 }
 
 // Open connects to the database at url.

@@ -20,10 +20,17 @@ Status: work in progress, v0.1 is not released.
   `conflicting_duplicate`. The key, the answer and an outbox row are written in one transaction, and a relay delivers
   the outbox to the ERP (mock-1c on the stand) with retries and an idempotent receiver, so a crash of the gateway or a
   lost answer of the ERP does not make a second order. `make chaos-dup` tests this (see below).
-- Not yet: policies and approvals (limits, ship-to and partner checks, risk levels, requests to an operator), sagas,
-  outgoing documents (855, 856) and the 997 and MDN receipts. `erp.create_sales_order` today checks the data of the
-  document and the price list, and nothing else: the limits of a partner are stored but not enforced. The design is
-  in [docs](docs).
+- Also works now: business policies. Every call with an effect goes through an embedded OPA policy
+  (`policies/edigate.rego`, tests in `policies/edigate_test.rego`, run by `make policy-test`). It refuses an unknown
+  or inactive partner, a wrong role, a ship-to that is not one of the partner's codes, and a supplier invoice
+  without a matching order (`policy_denied`, with the rule names in `data.explain`). An order above the limit of a
+  document, or above the limit of a partner for the day (UTC), is not refused: the answer is `pending_approval` and
+  an operator decides. A supplier invoice, `erp.post_vendor_invoice`, always needs two different operators. The
+  operator sees typed values and rule names, never the text of a note, over `/ops/` or with
+  `edigatectl approvals list|approve|reject`. A request that nobody decides in 30 minutes expires.
+- Not yet: sagas, outgoing documents (855, 856), the other tools of risk level 2 (`erp.confirm_order`,
+  `edi.send_asn`, `notify.send_email`; their rules are written and tested, the tools are not) and the 997 and MDN
+  receipts. The design is in [docs](docs).
 
 ## Try it
 
@@ -55,7 +62,19 @@ several minutes and puts the normal stand back at the end.
 An operator reopens a failed order key over HTTP, not in the database:
 `edigatectl txn reopen --url http://127.0.0.1:18080 --token <operator token> <key-hex>`.
 
-`make test` runs `go vet`, the tests with the race detector and `govulncheck`. It starts PostgreSQL in Docker and
+The smoke test also sends an order above the limit and approves it as an operator, sends an order with an unknown
+ship-to and sees `policy_denied`, and books a supplier invoice with two different operators. By hand:
+
+```sh
+bin/edigatectl approvals list --url http://127.0.0.1:18080 --token <operator token>
+bin/edigatectl approvals approve --url http://127.0.0.1:18080 --token <operator token> <approval id>
+```
+
+The same operator cannot approve twice, and an operator sees only the requests of their own tenant. Limits, ship-to
+codes, the forecast amount and the orders to suppliers come from the fixtures file (`edigatectl fixtures load`); a
+limit that is not set means that nothing goes through without an operator.
+
+`make test` runs the policy tests, `go vet`, the tests with the race detector and `govulncheck`. It starts PostgreSQL in Docker and
 downloads govulncheck on the first run. `make fuzz` fuzzes the X12 parser for 60 seconds. A test against a real
 local model runs with
 `EDIGATE_TEST_OLLAMA_URL=http://127.0.0.1:11434/v1 go test -v -run Live ./internal/quarantine/...` and is skipped

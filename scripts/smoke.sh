@@ -12,7 +12,10 @@
 # 850 (accepted, a txn_id), the same call gives the same answer, txn.status turns
 # completed and mock-1c holds one order priced from the price list; a note reference
 # in the arguments is refused (by the schema); the answers hold no business key,
-# idempotency key or price of the 850.
+# idempotency key or price of the 850. Wave 2-6 adds: an order above the limit waits as
+# pending_approval, one operator approves it with edigatectl and it completes (y); an unknown
+# ship-to gives policy_denied with ship_to.unknown (f2); a supplier invoice needs two different
+# operators and reaches mock-1c once (x).
 # Exits 0 only if every check matches. Safe to run again: principal ids carry a
 # random suffix, ISA13 comes from the clock, and the EDI rows of the tenant
 # "smoke" (stand data only) are cleared at the start so that step a still sees
@@ -27,9 +30,12 @@ COMPOSE="docker compose -f deploy/compose/docker-compose.yml"
 SUFFIX=$(date +%s)$$
 AGENT_ID="smoke-agent-$SUFFIX"
 OPERATOR_ID="smoke-operator-$SUFFIX"
+OPERATOR2_ID="smoke-operator2-$SUFFIX"
 PARTNER_ID="smoke-partner-$SUFFIX"
+SUPPLIER_ID="smoke-supplier-$SUFFIX"
 GATEWAY=ZZ:ZZTESTSUPPL
 BUYER=ZZ:ZZTESTBUYER
+VENDOR=ZZ:ZZTESTVENDOR
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
@@ -63,16 +69,27 @@ post() {
 		"$@" --data "$CALL_BODY"
 }
 
-# edi850 <file> <ISA13> <order number>: writes an 850 of the smoke partner. The
-# PID05, MSG01 and N1-02 texts are what the agent must never see.
+# edi850 <file> <ISA13> <order number> [quantity] [ship-to code]: writes an 850 of the smoke
+# partner (quantity 10 and ship-to DC01 unless given). The PID05, MSG01 and N1-02 texts are
+# what the agent must never see.
 PID_TEXT="SMOKE SECRET WIDGET TEXT"
 MSG_TEXT="Please call before delivery."
 edi850() {
 	{
 		printf 'ISA*00*          *00*          *ZZ*ZZTESTBUYER    *ZZ*ZZTESTSUPPL    *261018*1200*U*00401*%s*0*T*>~' "$2"
 		printf 'GS*PO*ZZTESTBUYER*ZZTESTSUPPL*20261018*1200*1*X*004010~ST*850*0001~BEG*00*SA*%s**20261018~' "$3"
-		printf 'N1*BY*TEST BUYER*92*B001~N1*ST*TEST SHIP-TO*92*DC01~PO1*1*10*EA*5.25**UP*012345678905~'
+		printf 'N1*BY*TEST BUYER*92*B001~N1*ST*TEST SHIP-TO*92*%s~PO1*1*%s*EA*5.25**UP*012345678905~' "${5:-DC01}" "${4:-10}"
 		printf 'PID*F****%s~MSG*%s~CTT*1~SE*9*0001~GE*1*1~IEA*1*%s~' "$PID_TEXT" "$MSG_TEXT" "$2"
+	} >"$1"
+}
+
+# edi810 <file> <ISA13> <invoice number> <order number>: writes an 810 of the smoke supplier
+# for 10 pieces at 3.00 (total 30.00), the order SPO-SMK-1 of the fixtures.
+edi810() {
+	{
+		printf 'ISA*00*          *00*          *ZZ*ZZTESTVENDOR   *ZZ*ZZTESTSUPPL    *261018*1200*U*00401*%s*0*T*>~' "$2"
+		printf 'GS*IN*ZZTESTVENDOR*ZZTESTSUPPL*20261018*1200*1*X*004010~ST*810*0001~BIG*20261018*%s*20261018*%s~' "$3" "$4"
+		printf 'CUR*SE*USD~N1*BY*TEST BUYER*92*B001~IT1*1*10*EA*3.00**UP*012345678905~TDS*3000~CTT*1~SE*8*0001~GE*1*1~IEA*1*%s~' "$2"
 	} >"$1"
 }
 
@@ -83,8 +100,9 @@ send() {
 
 CALL_BODY='{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"edi.list_inbox","arguments":{}}}'
 
-sql "DELETE FROM outbox WHERE tenant_id = 'smoke'" "DELETE FROM idempotency_keys WHERE tenant_id = 'smoke'" \
-	"DELETE FROM mock_onec.sales_orders WHERE tenant_id = 'smoke'" \
+sql "DELETE FROM approvals WHERE tenant_id = 'smoke'" "DELETE FROM daily_auto_totals WHERE tenant_id = 'smoke'" \
+	"DELETE FROM outbox WHERE tenant_id = 'smoke'" "DELETE FROM idempotency_keys WHERE tenant_id = 'smoke'" \
+	"DELETE FROM mock_onec.sales_orders WHERE tenant_id = 'smoke'" "DELETE FROM mock_onec.vendor_invoices WHERE tenant_id = 'smoke'" \
 	"DELETE FROM quarantine_calls WHERE tenant_id = 'smoke'" "DELETE FROM edi_notes WHERE tenant_id = 'smoke'" \
 	"DELETE FROM edi_documents WHERE tenant_id = 'smoke'" "DELETE FROM edi_interchanges WHERE tenant_id = 'smoke'" \
 	"DELETE FROM edi_rejected WHERE tenant_id = 'smoke'" >/dev/null
@@ -96,6 +114,8 @@ sql "DELETE FROM outbox WHERE tenant_id = 'smoke'" "DELETE FROM idempotency_keys
 AGENT_TOKEN=$("$BIN/edigatectl" token issue --tenant smoke --kind agent --id "$AGENT_ID")
 OPERATOR_TOKEN=$("$BIN/edigatectl" token issue --tenant smoke --kind operator --id "$OPERATOR_ID")
 PARTNER_TOKEN=$("$BIN/edigatectl" token issue --tenant smoke --kind partner --id "$PARTNER_ID" --partner "$BUYER")
+OPERATOR2_TOKEN=$("$BIN/edigatectl" token issue --tenant smoke --kind operator --id "$OPERATOR2_ID")
+SUPPLIER_TOKEN=$("$BIN/edigatectl" token issue --tenant smoke --kind partner --id "$SUPPLIER_ID" --partner "$VENDOR")
 
 # (a) the agent gets an empty inbox
 out=$("$BIN/edigatectl" call --url "$URL" --token "$AGENT_TOKEN" edi.list_inbox '{}')
@@ -292,6 +312,112 @@ out=$(send "$TMP/first.edi" ZZ:ZZTESTOTHER) || rc=$?
 [ "$rc" = 1 ] || fail "k: expected exit code 1, got $rc"
 expect "k HTTP 403" "$out" "HTTP 403"
 expect "k forbidden" "$out" '"reason":"forbidden"'
+
+# --- wave 2-6: policies, approval requests and the rule of four eyes ---
+OPS_URL=http://127.0.0.1:18080
+
+# send_as <token> <from> <file>: posts a file as another partner.
+send_as() {
+	"$BIN/edigatectl" send --url "$INBOUND" --token "$1" --from "$2" --to "$GATEWAY" --file "$3"
+}
+
+# wait_status <txn id> <status>: waits up to 20 s for txn.status to show the status.
+wait_status() {
+	waited=0
+	while :; do
+		cur=$(call_agent txn.status "{\"txn_id\":\"$1\"}") || fail "wait: txn.status failed: $cur"
+		case "$cur" in *"\"status\":\"$2\""*) return 0 ;; esac
+		waited=$((waited + 1))
+		[ "$waited" -le 40 ] || fail "wait: expected $2 within 20 s, got: $cur"
+		sleep 0.5
+	done
+}
+
+# (y) an order above auto_max_amount (1000 pieces at 7.50 = 7500.00 against 5000.00) is not
+# refused: it waits as pending_approval. The operator sees it with the rule name and no
+# partner text; one approve through edigatectl and a few seconds later it is completed, with
+# one order in mock-1c.
+sleep 1
+BIG_ISA=$(printf '%09d' $((($(date +%s) + 7) % 1000000000)))
+BIG_REF="SMKBIG$BIG_ISA"
+edi850 "$TMP/big.edi" "$BIG_ISA" "$BIG_REF" 1000
+out=$(send "$TMP/big.edi") || fail "y: send failed: $out"
+expect "y HTTP 200" "$out" "HTTP 200"
+BIG_DOC=$(sql "SELECT id FROM edi_documents WHERE tenant_id = 'smoke' AND bk_ref = '$BIG_REF'")
+[ -n "$BIG_DOC" ] || fail "y: the large order was not stored"
+pending=$(call_agent erp.create_sales_order "{\"source_document_id\":\"$BIG_DOC\"}") || fail "y: erp.create_sales_order failed: $pending"
+expect "y pending_approval" "$pending" '"status":"pending_approval"'
+APPROVAL_ID=$(printf '%s' "$pending" | sed -n 's/.*"approval_id":"\([^"]*\)".*/\1/p')
+BIG_TXN=$(printf '%s' "$pending" | sed -n 's/.*"txn_id":"\([^"]*\)".*/\1/p')
+[ -n "$APPROVAL_ID" ] && [ -n "$BIG_TXN" ] || fail "y: no approval_id or txn_id in: $pending"
+n=$(sql "SELECT count(*) FROM outbox o JOIN idempotency_keys k ON k.key = o.idem_key WHERE k.txn_id = '$BIG_TXN'")
+[ "$n" = 0 ] || fail "y: a waiting request has $n outbox rows"
+listed=$("$BIN/edigatectl" approvals list --url "$OPS_URL" --token "$OPERATOR_TOKEN") || fail "y: approvals list failed: $listed"
+expect "y list shows the request" "$listed" "$APPROVAL_ID"
+expect "y list shows the rule" "$listed" '"rules":["limit.document"]'
+case "$listed" in
+*"$PID_TEXT"* | *"$MSG_TEXT"* | *"call before delivery"* | *"TEST BUYER"* | *"TEST SHIP-TO"*) fail "y: partner text in the list for the operator: $listed" ;;
+*) echo "ok: y no partner text in the list" ;;
+esac
+decided=$("$BIN/edigatectl" approvals approve --url "$OPS_URL" --token "$OPERATOR_TOKEN" "$APPROVAL_ID") || fail "y: approve failed: $decided"
+expect "y approved" "$decided" '"status":"approved"'
+wait_status "$BIG_TXN" completed
+n=$(sql "SELECT count(*) FROM mock_onec.sales_orders WHERE tenant_id = 'smoke' AND business_ref = '$BIG_REF'")
+[ "$n" = 1 ] || fail "y: expected one order in mock-1c, got $n"
+echo "ok: y approved by an operator, completed, one order in mock-1c"
+
+# (f2) a ship-to that is not one of the partner's codes (DC99) is refused with policy_denied
+# and the rule name, and no key is kept
+sleep 1
+DC_ISA=$(printf '%09d' $((($(date +%s) + 11) % 1000000000)))
+DC_REF="SMKDC$DC_ISA"
+edi850 "$TMP/dc99.edi" "$DC_ISA" "$DC_REF" 10 DC99
+out=$(send "$TMP/dc99.edi") || fail "f2: send failed: $out"
+DC_DOC=$(sql "SELECT id FROM edi_documents WHERE tenant_id = 'smoke' AND bk_ref = '$DC_REF'")
+[ -n "$DC_DOC" ] || fail "f2: the order was not stored"
+rc=0
+denied=$(call_agent erp.create_sales_order "{\"source_document_id\":\"$DC_DOC\"}") || rc=$?
+[ "$rc" = 1 ] || fail "f2: expected exit code 1, got $rc: $denied"
+expect "f2 policy_denied" "$denied" '"reason":"policy_denied"'
+expect "f2 rule name" "$denied" '"explain":["ship_to.unknown"]'
+n=$(sql "SELECT count(*) FROM idempotency_keys WHERE tenant_id = 'smoke' AND business_key->>1 = '$DC_REF'")
+[ "$n" = 0 ] || fail "f2: a refused order left $n keys"
+rule=$(sql "SELECT policy_explain->'deny'->>0 FROM audit_log WHERE tenant_id = 'smoke' AND event_type = 'policy_denied' ORDER BY seq DESC LIMIT 1")
+[ "$rule" = "ship_to.unknown" ] || fail "f2: the audit row holds '$rule'"
+echo "ok: f2 audit row with the decision"
+
+# (x) a supplier invoice that matches the order SPO-SMK-1 always waits for two operators:
+# one approve leaves it pending (and the same operator again gets 409), the second operator
+# completes it, and mock-1c holds one invoice
+sleep 1
+INV_ISA=$(printf '%09d' $((($(date +%s) + 13) % 1000000000)))
+INV_NO="SMKINV$INV_ISA"
+edi810 "$TMP/inv.edi" "$INV_ISA" "$INV_NO" SPO-SMK-1
+out=$(send_as "$SUPPLIER_TOKEN" "$VENDOR" "$TMP/inv.edi") || fail "x: send failed: $out"
+expect "x HTTP 200" "$out" "HTTP 200"
+INV_DOC=$(sql "SELECT id FROM edi_documents WHERE tenant_id = 'smoke' AND st01 = '810' AND bk_ref = '$INV_NO'")
+[ -n "$INV_DOC" ] || fail "x: the invoice was not stored"
+inv=$(call_agent erp.post_vendor_invoice "{\"source_document_id\":\"$INV_DOC\"}") || fail "x: erp.post_vendor_invoice failed: $inv"
+expect "x pending_approval" "$inv" '"status":"pending_approval"'
+INV_APPROVAL=$(printf '%s' "$inv" | sed -n 's/.*"approval_id":"\([^"]*\)".*/\1/p')
+INV_TXN=$(printf '%s' "$inv" | sed -n 's/.*"txn_id":"\([^"]*\)".*/\1/p')
+[ -n "$INV_APPROVAL" ] && [ -n "$INV_TXN" ] || fail "x: no approval_id or txn_id in: $inv"
+first_ok=$("$BIN/edigatectl" approvals approve --url "$OPS_URL" --token "$OPERATOR_TOKEN" "$INV_APPROVAL") || fail "x: the first approve failed: $first_ok"
+expect "x still pending after one operator" "$first_ok" '"status":"pending"'
+expect "x one of two" "$first_ok" '"approvals":1'
+rc=0
+twice=$("$BIN/edigatectl" approvals approve --url "$OPS_URL" --token "$OPERATOR_TOKEN" "$INV_APPROVAL") || rc=$?
+[ "$rc" = 1 ] || fail "x: expected exit code 1 for the same operator, got $rc"
+expect "x HTTP 409" "$twice" "HTTP 409"
+expect "x same operator" "$twice" "already decided by this operator"
+n=$(sql "SELECT count(*) FROM mock_onec.vendor_invoices WHERE tenant_id = 'smoke'")
+[ "$n" = 0 ] || fail "x: the invoice reached mock-1c after one operator"
+second_ok=$("$BIN/edigatectl" approvals approve --url "$OPS_URL" --token "$OPERATOR2_TOKEN" "$INV_APPROVAL") || fail "x: the second approve failed: $second_ok"
+expect "x approved by two" "$second_ok" '"status":"approved"'
+wait_status "$INV_TXN" completed
+row=$(sql "SELECT invoice_number || '|' || order_ref || '|' || total::text FROM mock_onec.vendor_invoices WHERE tenant_id = 'smoke'")
+[ "$row" = "$INV_NO|SPO-SMK-1|30.00" ] || fail "x: invoice in mock-1c (number|order|total): $row"
+echo "ok: x invoice approved by two operators, one invoice in mock-1c"
 
 # (o) the gateway log holds none of the partner's text
 logs=$($COMPOSE logs --no-color edigate)

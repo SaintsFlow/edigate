@@ -1,7 +1,7 @@
 COMPOSE = docker compose -f deploy/compose/docker-compose.yml
 TEST_DB = postgres://edigate:edigate@127.0.0.1:55432/edigate?sslmode=disable
 
-.PHONY: build up down test fuzz smoke chaos-dup corpus
+.PHONY: build up down test policy-test fuzz smoke chaos-dup corpus
 
 build:
 	go build -o bin/ ./cmd/...
@@ -12,9 +12,13 @@ up:
 down:
 	$(COMPOSE) down -v
 
-# Starts only postgres, then vet, tests with the race detector and govulncheck.
-# make stops at the first failing command and returns its code.
-test:
+# The tests of the Rego policy (policies/*_test.rego), one or more per rule.
+policy-test:
+	go run github.com/open-policy-agent/opa@v1.21.2 test policies/ -v
+
+# Starts only postgres, then the policy tests, vet, tests with the race detector and
+# govulncheck. make stops at the first failing command and returns its code.
+test: policy-test
 	$(COMPOSE) up -d --wait postgres
 	go vet ./...
 	EDIGATE_TEST_DB_URL='$(TEST_DB)' go test -race -count=1 -v ./...

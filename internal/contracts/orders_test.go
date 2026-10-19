@@ -74,14 +74,32 @@ func TestValidateTxnStatus(t *testing.T) {
 }
 
 func TestValidateOrderOutput(t *testing.T) {
-	for _, ok := range []string{`{"status":"accepted","txn_id":"x"}`, `{"status":"rejected","txn_id":"x","reason":"dead"}`} {
-		if err := ValidateOutput("erp.create_sales_order", []byte(ok)); err != nil {
-			t.Errorf("%s: %v", ok, err)
+	for _, tool := range []string{"erp.create_sales_order", "erp.post_vendor_invoice"} {
+		for _, ok := range []string{
+			`{"status":"accepted","txn_id":"x"}`, `{"status":"rejected","txn_id":"x","reason":"dead"}`,
+			`{"status":"pending_approval","txn_id":"x","approval_id":"a"}`, `{"status":"expired","txn_id":"x"}`,
+			`{"status":"rejected","txn_id":"x","reason":"approval_rejected"}`,
+		} {
+			if err := ValidateOutput(tool, []byte(ok)); err != nil {
+				t.Errorf("%s %s: %v", tool, ok, err)
+			}
+		}
+		for _, bad := range []string{`{"status":"accepted"}`, `{"status":"pending","txn_id":"x"}`, `{"status":"accepted","txn_id":"x","key":"ab"}`} {
+			if err := ValidateOutput(tool, []byte(bad)); err == nil {
+				t.Errorf("%s %s must be refused", tool, bad)
+			}
 		}
 	}
-	for _, bad := range []string{`{"status":"accepted"}`, `{"status":"pending_approval","txn_id":"x"}`, `{"status":"accepted","txn_id":"x","key":"ab"}`} {
-		if err := ValidateOutput("erp.create_sales_order", []byte(bad)); err == nil {
-			t.Errorf("%s must be refused", bad)
+}
+
+func TestValidatePostVendorInvoiceInput(t *testing.T) {
+	const id = "11111111-1111-4111-8111-111111111111"
+	if err := Validate("erp.post_vendor_invoice", []byte(`{"source_document_id":"`+id+`"}`)); err != nil {
+		t.Error(err)
+	}
+	for _, bad := range []string{`{}`, `{"source_document_id":"$note_1"}`, `{"source_document_id":"` + id + `","total":"1.00"}`, `{"source_document_id":"` + id + `","tenant":"tb"}`} {
+		if err := Validate("erp.post_vendor_invoice", []byte(bad)); !errors.Is(err, ErrInvalid) {
+			t.Errorf("%s: want ErrInvalid, got %v", bad, err)
 		}
 	}
 }

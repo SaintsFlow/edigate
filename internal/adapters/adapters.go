@@ -27,8 +27,8 @@ type Adapter interface {
 	// Apply performs the effect and returns the reference of the other system.
 	// A second Apply with the same ExternalID returns the same reference.
 	Apply(ctx context.Context, e Effect) (ref string, err error)
-	// Exists asks whether an effect with this external id is already there.
-	Exists(ctx context.Context, externalID string) (found bool, ref string, err error)
+	// Exists asks whether an effect of this type with this external id is already there.
+	Exists(ctx context.Context, effectType, externalID string) (found bool, ref string, err error)
 }
 
 // StatusError is an answer of the other system with an unexpected HTTP status.

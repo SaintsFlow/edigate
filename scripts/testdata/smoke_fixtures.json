@@ -9,6 +9,19 @@
       "daily_auto_max": "50000.00",
       "contacts": ["orders@buyer.test"],
       "ship_to_codes": ["DC01"]
+    },
+    {
+      "partner_id": "ZZ:ZZTESTVENDOR",
+      "role": "supplier",
+      "name": "Smoke supplier",
+      "contacts": ["accounts@vendor.test"],
+      "supplier_orders": [
+        {
+          "order_number": "SPO-SMK-1",
+          "lines": [{"sku": "012345678905", "qty": 10, "unit_price": "3.00"}],
+          "total": "30.00"
+        }
+      ]
     }
   ],
   "price_list": [
