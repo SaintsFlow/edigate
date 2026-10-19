@@ -51,6 +51,9 @@ type rig struct {
 	rec     *recorder // sits in front of the policy and keeps what it was asked
 	srv     atomic.Pointer[mcp.Server]
 	seq     atomic.Int64
+
+	keepAcks bool // keep the 997 the intake queues (see dropAcks)
+	noCUR    bool // send810 leaves the CUR segment out
 }
 
 // recorder is a Decider that remembers every call and passes it to the real policy.

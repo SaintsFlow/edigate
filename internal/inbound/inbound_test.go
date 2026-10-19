@@ -255,7 +255,7 @@ func TestInboundStoresDocumentsAndAnswersWithMDN(t *testing.T) {
 		t.Fatalf("%d received documents, want 2", n)
 	}
 	var sha, raw []byte
-	r.must(r.pool.QueryRow(context.Background(), `SELECT raw_sha256, raw FROM edi_interchanges`).Scan(&sha, &raw))
+	r.must(r.pool.QueryRow(context.Background(), `SELECT raw_sha256, raw FROM edi_interchanges WHERE direction = 'in'`).Scan(&sha, &raw))
 	if fmt.Sprintf("%x", sha) != m.MICSHA256 || !bytes.Equal(raw, body) {
 		t.Fatal("the stored hash or bytes differ from the request")
 	}
@@ -411,7 +411,7 @@ func TestT_PARSE_06_SameISA13AndAnotherBodyIsRefused(t *testing.T) {
 	if m.Disposition != "processed/Error: unexpected-processing-error" || m.OriginalMessageID != "<b@test>" {
 		t.Fatalf("MDN: %s", got.body)
 	}
-	if n := r.count(`SELECT count(*) FROM edi_interchanges`); n != 1 {
+	if n := r.count(`SELECT count(*) FROM edi_interchanges WHERE direction = 'in'`); n != 1 {
 		t.Fatalf("%d interchange rows, want 1", n)
 	}
 	if n := r.count(`SELECT count(*) FROM edi_documents`); n != 1 {
@@ -454,7 +454,7 @@ func TestT_PARSE_06_TwoIdenticalRequestsAtOnce(t *testing.T) {
 	if !bytes.Equal(results[0].body, results[1].body) {
 		t.Fatalf("MDN differs:\n%s\n%s", results[0].body, results[1].body)
 	}
-	if n := r.count(`SELECT count(*) FROM edi_interchanges`); n != 1 {
+	if n := r.count(`SELECT count(*) FROM edi_interchanges WHERE direction = 'in'`); n != 1 {
 		t.Fatalf("%d interchange rows, want 1", n)
 	}
 	if n := r.count(`SELECT count(*) FROM edi_documents`); n != 1 {
@@ -594,6 +594,12 @@ func TestReadDocumentReturnsTypedFields(t *testing.T) {
 	me, tok := r.fresh("ta", "customer")
 	wantStatus(t, r.post(tok, me, gatewayID, "<r@test>", exchange(t, "850_full.edi", me, "000000901")), 200)
 	agent := r.token("ta", "agent", "")
+	// The addresses of the partner come from the starting data of the gateway, not from the PER segments.
+	r.must(func() error {
+		_, err := r.pool.Exec(context.Background(),
+			`INSERT INTO partner_contacts (tenant_id, partner_id, email) VALUES ('ta', $1, 'orders@buyer.test'), ('ta', $1, 'logistics@buyer.test')`, me)
+		return err
+	}())
 
 	list, wire := r.call(agent, "edi.list_inbox", map[string]any{})
 	if wire != nil || !strings.Contains(string(list), `"business_ref":"PO20002"`) || !strings.Contains(string(list), `"status":"received"`) {
@@ -614,6 +620,9 @@ func TestReadDocumentReturnsTypedFields(t *testing.T) {
 	if got.ID != id || got.ST01 != "850" || got.Status != "received" || got.Header["business_ref"] != "PO20002" ||
 		got.Header["ship_to"] != "DC01" || len(got.Lines) != 3 || len(got.Notes) != 9 {
 		t.Fatalf("document: %s", doc)
+	}
+	if !strings.Contains(string(doc), `"partner_contacts":["logistics@buyer.test","orders@buyer.test"]`) {
+		t.Fatalf("the contacts of the partner are not in the header: %s", doc)
 	}
 	if !strings.Contains(string(doc), `"unit_price":12.50`) {
 		t.Fatalf("a price lost its text form: %s", doc)

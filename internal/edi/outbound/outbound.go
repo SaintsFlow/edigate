@@ -93,6 +93,12 @@ func Build(s Spec, env Envelope) ([]byte, error) {
 	default:
 		return nil, fmt.Errorf("no builder for transaction set %q", s.ST01)
 	}
+	return wrap(s.ST01, GroupCode(s.ST01), body, env)
+}
+
+// wrap puts a set body into an interchange of one group and one set, writes it and checks
+// the result with the strict parser.
+func wrap(st01, gs01 string, body []x12.Segment, env Envelope) ([]byte, error) {
 	sendQual, sendID, _ := strings.Cut(env.Sender, ":")
 	recvQual, recvID, _ := strings.Cut(env.Receiver, ":")
 	now := env.Now.UTC()
@@ -100,9 +106,9 @@ func Build(s Spec, env Envelope) ([]byte, error) {
 	ic.ISA = x12.Segment{ID: "ISA", Elements: elements("00", "", "00", "", sendQual, sendID, recvQual, recvID,
 		now.Format("060102"), now.Format("1504"), "U", "00401", env.ISA13, "0", "T")}
 	group := x12.Group{
-		GS: segment("GS", GroupCode(s.ST01), sendID, recvID, now.Format("20060102"), now.Format("1504"), env.GS06, "X", "004010"),
+		GS: segment("GS", gs01, sendID, recvID, now.Format("20060102"), now.Format("1504"), env.GS06, "X", "004010"),
 		Sets: []x12.Set{{
-			ST:       segment("ST", s.ST01, env.ST02),
+			ST:       segment("ST", st01, env.ST02),
 			Segments: body,
 			SE:       segment("SE", strconv.Itoa(len(body)+2), env.ST02),
 		}},
@@ -114,12 +120,12 @@ func Build(s Spec, env Envelope) ([]byte, error) {
 	raw := x12.Write(ic)
 	parsed, err := x12.Parse(raw)
 	if err != nil {
-		return nil, fmt.Errorf("the gateway's own %s does not parse: %w", s.ST01, err)
+		return nil, fmt.Errorf("the gateway's own %s does not parse: %w", st01, err)
 	}
 	for _, g := range parsed.Groups {
 		for _, set := range g.Sets {
 			if len(set.Errors) > 0 {
-				return nil, fmt.Errorf("the gateway's own %s has a set error (AK502 %s)", s.ST01, set.Errors[0].AK502)
+				return nil, fmt.Errorf("the gateway's own %s has a set error (AK502 %s)", st01, set.Errors[0].AK502)
 			}
 		}
 	}

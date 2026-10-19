@@ -314,7 +314,8 @@ class ScriptedAgent:
         slot = self.ctx.slot
         loop = asyncio.get_running_loop()
         while True:
-            n = await loop.run_in_executor(None, lambda: slot.slot_conn.execute("SELECT count(*) FROM outbound_docs").fetchone()[0])
+            n = await loop.run_in_executor(None, lambda: slot.slot_conn.execute(
+                "SELECT count(*) FROM outbound_docs WHERE st01 IN ('855', '856')").fetchone()[0])
             if n:
                 break
             await asyncio.sleep(0.05)
@@ -331,7 +332,8 @@ class ScriptedAgent:
         while time.time() < end and slot.open_work()[0]:
             time.sleep(0.5)
         rows = slot.slot_conn.execute(
-            "SELECT st01, gs06, st02, partner_id FROM outbound_docs WHERE ack_status IS NULL ORDER BY created_at").fetchall()
+            "SELECT st01, gs06, st02, partner_id FROM outbound_docs WHERE st01 IN ('855', '856') AND ack_status IS NULL "
+            "ORDER BY created_at").fetchall()
         for i, (st01, gs06, st02, partner) in enumerate(rows):
             fake_label = dict(ctx.label, ack_target=st01, partner_id=partner)
             raw = build_ack("A", fake_label, gs06, st02, number=900 + i)

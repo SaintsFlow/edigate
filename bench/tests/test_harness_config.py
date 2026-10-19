@@ -5,6 +5,7 @@ bench/.venv/bin/python -I bench/tests/test_harness_config.py
 import base64
 import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -12,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import common  # noqa: E402,F401
 
 from harness import configs, faults, operator  # noqa: E402
+from harness.corpus import Corpus  # noqa: E402
 from harness.stand import HarnessError, address_document  # noqa: E402
 
 
@@ -106,6 +108,21 @@ class Documents(unittest.TestCase):
         a, b = raw.decode().split(raw.decode()[105]), out.decode().split(raw.decode()[105])
         changed = [x[:3] for x, y in zip(a, b) if x != y]
         self.assertEqual(changed, ["ISA", "GS*", "GE*", "IEA"])
+
+
+class Selection(unittest.TestCase):
+    def test_the_smoke_picks_an_invoice_without_cur_and_does_not_filter_them(self):
+        """Wave 2-9c: CUR is optional for the gateway, so the smoke takes 810 documents as they come and keeps one without CUR."""
+        _, files = common.corpus(2)
+        with tempfile.TemporaryDirectory() as d:
+            for name in ("labels.jsonl", "corpus.jsonl", "fixtures.json", "deciding.json"):
+                Path(d, name).write_bytes(files[name])
+            corpus = Corpus(d)
+            ids = corpus.stratified(20)
+            invoices = [i for i in ids if corpus.labels[i]["set"] == "810" and corpus.labels[i]["class"] == "benign"]
+            self.assertTrue(invoices)
+            self.assertTrue(any(not corpus.has_currency(i) for i in invoices), invoices)
+            self.assertEqual(ids, corpus.stratified(20))       # the choice is the same every time
 
 
 class OperatorByLabel(unittest.TestCase):

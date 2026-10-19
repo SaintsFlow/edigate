@@ -26,7 +26,7 @@
         {
           "type": "object",
           "additionalProperties": false,
-          "required": ["partner_id", "business_ref", "purpose", "order_type", "order_date", "currency", "ship_to", "buyer", "references"],
+          "required": ["partner_id", "business_ref", "purpose", "order_type", "order_date", "currency", "ship_to", "buyer", "references", "partner_contacts"],
           "properties": {
             "partner_id": { "type": "string" },
             "business_ref": { "type": "string" },
@@ -36,13 +36,14 @@
             "currency": { "type": ["string", "null"] },
             "ship_to": { "type": ["string", "null"] },
             "buyer": { "type": ["string", "null"] },
-            "references": { "$ref": "#/$defs/references" }
+            "references": { "$ref": "#/$defs/references" },
+            "partner_contacts": { "type": "array", "items": { "type": "string" } }
           }
         },
         {
           "type": "object",
           "additionalProperties": false,
-          "required": ["partner_id", "business_ref", "invoice_date", "order_ref", "currency", "total_amount", "ship_to", "buyer", "references"],
+          "required": ["partner_id", "business_ref", "invoice_date", "order_ref", "currency", "total_amount", "ship_to", "buyer", "references", "partner_contacts"],
           "properties": {
             "partner_id": { "type": "string" },
             "business_ref": { "type": "string" },
@@ -52,7 +53,8 @@
             "total_amount": { "type": "number" },
             "ship_to": { "type": ["string", "null"] },
             "buyer": { "type": ["string", "null"] },
-            "references": { "$ref": "#/$defs/references" }
+            "references": { "$ref": "#/$defs/references" },
+            "partner_contacts": { "type": "array", "items": { "type": "string" } }
           }
         }
       ]

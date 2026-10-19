@@ -1,7 +1,7 @@
 // Package server is partner-emulator: the stand's trading partner that receives the
 // documents the gateway sends and answers them the way a real partner does.
 //
-// Input: POST /as2 with an X12 interchange (an 855 or a 856) and the headers AS2-From (the
+// Input: POST /as2 with an X12 interchange (an 855, a 856 or the 997 of the gateway) and the headers AS2-From (the
 // gateway), AS2-To (this partner) and Message-Id. Output: the MDN as JSON, and later,
 // asynchronously, a 997 posted to the gateway's /edi/inbound with the token of this partner.
 // Every transmission is parsed with the strict parser of the gateway (internal/edi/x12) and
@@ -258,8 +258,10 @@ func parse(body []byte) (*x12.Interchange, []received, error) {
 				ref = first(set, "BAK", 3)
 			case "856":
 				ref = first(set, "PRF", 1)
+			case "997":
+				// the acknowledgment of the gateway for a document of this partner; kept, never answered
 			default:
-				return nil, nil, errors.New("this partner takes 855 and 856 only")
+				return nil, nil, errors.New("this partner takes 855, 856 and 997 only")
 			}
 			out = append(out, received{st01: set.ST.Value(1), gs06: g.GS.Value(6), st02: set.ST.Value(2), ref: ref})
 		}
@@ -307,6 +309,9 @@ func (s *Server) acknowledge(k Knobs, gateway, partner, replyTo string, ic *x12.
 		time.Sleep(time.Duration(k.AckDelayMS) * time.Millisecond)
 	}
 	for _, g := range ic.Groups {
+		if len(g.Sets) > 0 && g.Sets[0].ST.Value(1) == "997" {
+			continue // a 997 is never answered with a 997
+		}
 		raw, err := s.build997(k.AckStatus, gateway, partner, g)
 		if err != nil {
 			s.cfg.Log.Error("build the 997 failed", "error", err.Error())
@@ -513,7 +518,7 @@ func (s *Server) resetTenant(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	delete(s.byTenant, r.PathValue("tenant_id"))
 	s.mu.Unlock()
-	reply(w, http.StatusOK, s.current())
+	reply(w, http.StatusOK, map[string]string{"status": "reset"})
 }
 
 // fromStand reports whether the address is loopback or in a private network (the compose network).

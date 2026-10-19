@@ -49,6 +49,14 @@ Status: work in progress, v0.1 is not released.
 - Also works now: `erp.get_price_list` (the prices of your tenant, up to 50 SKUs) and `notify.send_email`, a letter
   made from one of three templates, sent only to a contact of the partner of the order. The letter has no text of the
   agent in it. The design is in [docs](docs).
+- Also works now: the gateway answers the partner. For every group of an incoming 850 or 810 it queues a 997 in the
+  transaction that stores the interchange, with control numbers from the same counter as the 855 and the 856, and
+  sends it with AS2 like any other document. A set the parser accepted is `A`; a set it refused is `R` with the AK3 and
+  AK4 that name the segment and the element. A set refused only for the role of the partner is right in syntax and
+  is `A`. A 997 from a partner is never answered, and an interchange refused as a whole (422) gets none, because it has no group to name. CUR is optional in an 850 and an 810: a document without it takes the
+  currency of the partner, else of the tenant. A missing `delivery_instruction` is the same request as `none`.
+  `edi.read_document` lists the known addresses of the partner in `partner_contacts` of the header, and
+  `erp.get_price_list` returns the label of the price list (`edigatectl price-list-id set --tenant T <label>`).
 
 ## Try it
 

@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
+
+	"github.com/SaintsFlow/edigate/internal/edi/outbound"
 )
 
 // Partner is a trading partner of a tenant. Role is "customer" (sends 850) or
@@ -84,6 +86,11 @@ type InboundInterchange struct {
 	MDN       []byte // JSON of the MDN sent for a new interchange
 	Documents []InboundDocument
 	Acks      []InboundAck // the verdicts of the 997 sets of the interchange, matched in the same transaction
+
+	// GatewayID (ISA07:ISA08 of the tenant) and Replies: the 997 to send for the groups of 850
+	// and 810 of a new interchange, queued in the same transaction. Nothing is queued for a repeat.
+	GatewayID string
+	Replies   []outbound.AckSpec
 }
 
 // Outcomes of SaveInbound.
@@ -170,6 +177,9 @@ func (s *Store) SaveInbound(ctx context.Context, in InboundInterchange) (SaveRes
 	if err := matchAcks(ctx, tx, in.TenantID, in.PartnerID, in.Acks); err != nil {
 		return SaveResult{}, err
 	}
+	if err := queueReplies(ctx, tx, in); err != nil {
+		return SaveResult{}, err
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return SaveResult{}, err
 	}
@@ -247,6 +257,26 @@ func (s *Store) ReadDocument(ctx context.Context, tenantID, id string) (Document
 		return Document{}, ErrNotFound
 	}
 	return d, err
+}
+
+// PartnerContacts lists the e-mail addresses of a partner from the starting data of the gateway,
+// in alphabetical order (never nil).
+func (s *Store) PartnerContacts(ctx context.Context, tenantID, partnerID string) ([]string, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT email FROM partner_contacts WHERE tenant_id = $1 AND partner_id = $2 ORDER BY email`, tenantID, partnerID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []string{}
+	for rows.Next() {
+		var e string
+		if err := rows.Scan(&e); err != nil {
+			return nil, err
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
 }
 
 // NoteRef is what the agent may know about a note: where it is and why it is a

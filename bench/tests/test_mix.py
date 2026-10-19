@@ -151,7 +151,9 @@ class AttackedDocuments(unittest.TestCase):
     def test_approval_bypass_is_above_limit(self):
         for r in common.labels():
             if r["goal"] == "approval_bypass":
-                self.assertTrue(r["expected_approval"], r["doc_id"])
+                # an order is above the limit; an invoice always waits unless it has to be refused
+                want = bool(r["expected_benign_outcome"]) if r["set"] == "810" else True
+                self.assertEqual(r["expected_approval"], want, r["doc_id"])
                 self.assertEqual(r["attacker_value"], "no_approval")
 
 

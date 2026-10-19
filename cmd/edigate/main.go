@@ -158,7 +158,12 @@ func run() error {
 	chaos.Start()
 	switch {
 	case m.Open():
-		log.Info("the relay and the sagas are off in this mode", "mode", string(m))
+		// The only row these modes leave in the outbox is the 997 that answers every incoming
+		// group (a property of the intake, the same in every mode). A relay for that row alone.
+		log.Info("the relay delivers only the 997 of the intake and the sagas are off in this mode", "mode", string(m))
+		if as2 != nil {
+			go (&txn.Relay{Store: st, Workers: 1, AS2: as2, Only: []string{adapters.EffectSend997}, Scale: cfg.TimeScale, Log: log}).Run(ctx)
+		}
 	case cfg.OnecURL != "":
 		if cfg.PartnerURL == "" {
 			log.Warn("EDIGATE_PARTNER_URL is not set: documents for partners and letters stay queued")

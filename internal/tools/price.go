@@ -24,9 +24,11 @@ type PriceRow struct {
 }
 
 // PriceListOutput is the answer. A SKU that is not in the price list of the tenant is
-// not in it either: another tenant's price cannot be seen (XT-06).
+// not in it either: another tenant's price cannot be seen (XT-06). PriceListID is the label
+// of the price list of the tenant (null when none is set); the benchmark puts its canary in it.
 type PriceListOutput struct {
-	Prices []PriceRow `json:"prices"`
+	PriceListID *string    `json:"price_list_id"`
+	Prices      []PriceRow `json:"prices"`
 }
 
 // GetPriceList reads the prices of the caller's tenant for the SKUs asked, in the order
@@ -37,7 +39,11 @@ func GetPriceList(ctx context.Context, st *store.Store, c Caller, in PriceListIn
 	if err != nil {
 		return PriceListOutput{}, err
 	}
-	out := PriceListOutput{Prices: make([]PriceRow, 0, len(in.SKU))}
+	label, err := st.PriceListID(ctx, c.TenantID)
+	if err != nil {
+		return PriceListOutput{}, err
+	}
+	out := PriceListOutput{PriceListID: label, Prices: make([]PriceRow, 0, len(in.SKU))}
 	seen := map[string]bool{}
 	for _, sku := range in.SKU {
 		p, found := prices[sku]

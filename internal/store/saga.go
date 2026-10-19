@@ -92,33 +92,42 @@ func (s *Store) enqueue(ctx context.Context, tx pgx.Tx, tenantID string, key []b
 	if gateway == nil {
 		return errors.New("the tenant has no interchange id: it cannot send documents")
 	}
+	return queueDocument(ctx, tx, tenantID, *gateway, spec.PartnerID, key, effectType, spec.ST01,
+		func(env outbound.Envelope) ([]byte, error) { return outbound.Build(spec, env) })
+}
+
+// queueDocument gives a document to a partner its three control numbers, builds its bytes
+// with them, and stores the interchange (out), the outbox row and the row of outbound_docs
+// in the transaction of the caller. key is nil for a 997, which answers no effect.
+func queueDocument(ctx context.Context, tx pgx.Tx, tenantID, gateway, partnerID string, key []byte, effectType, st01 string,
+	build func(outbound.Envelope) ([]byte, error)) error {
 	var docID, messageUUID string
 	if err := tx.QueryRow(ctx, `SELECT gen_random_uuid()::text, gen_random_uuid()::text`).Scan(&docID, &messageUUID); err != nil {
 		return err
 	}
-	isa, err := nextNumber(ctx, tx, tenantID, spec.PartnerID, "isa")
+	isa, err := nextNumber(ctx, tx, tenantID, partnerID, "isa")
 	if err != nil {
 		return err
 	}
-	gs, err := nextNumber(ctx, tx, tenantID, spec.PartnerID, "gs")
+	gs, err := nextNumber(ctx, tx, tenantID, partnerID, "gs")
 	if err != nil {
 		return err
 	}
-	st, err := nextNumber(ctx, tx, tenantID, spec.PartnerID, "st")
+	st, err := nextNumber(ctx, tx, tenantID, partnerID, "st")
 	if err != nil {
 		return err
 	}
 	env := outbound.Envelope{
-		Sender: *gateway, Receiver: spec.PartnerID, Now: time.Now(),
+		Sender: gateway, Receiver: partnerID, Now: time.Now(),
 		ISA13: fmt.Sprintf("%09d", isa), GS06: strconv.FormatInt(gs, 10), ST02: fmt.Sprintf("%04d", st),
 	}
-	raw, err := outbound.Build(spec, env)
+	raw, err := build(env)
 	if err != nil {
 		return fmt.Errorf("build the document: %w", err)
 	}
 	sum := sha256Sum(raw)
 	t := adapters.Transmission{
-		DocID: docID, MessageID: "<" + messageUUID + "@edigate>", From: *gateway, To: spec.PartnerID, ISA13: env.ISA13, Body: string(raw),
+		DocID: docID, MessageID: "<" + messageUUID + "@edigate>", From: gateway, To: partnerID, ISA13: env.ISA13, Body: string(raw),
 	}
 	body, err := json.Marshal(t)
 	if err != nil {
@@ -131,14 +140,14 @@ func (s *Store) enqueue(ctx context.Context, tx pgx.Tx, tenantID string, key []b
 	if _, err := tx.Exec(ctx,
 		`INSERT INTO edi_interchanges (tenant_id, direction, counterparty_id, isa13, message_id, raw, raw_sha256, mic_sha256)
 		 VALUES ($1, 'out', $2, $3, $4, $5, $6, $6)`,
-		tenantID, spec.PartnerID, env.ISA13, t.MessageID, raw, sum); err != nil {
+		tenantID, partnerID, env.ISA13, t.MessageID, raw, sum); err != nil {
 		return fmt.Errorf("store the outgoing interchange: %w", err)
 	}
 	if _, err := tx.Exec(ctx,
 		`INSERT INTO outbound_docs (id, tenant_id, partner_id, saga_id, step_no, outbox_id, idem_key, st01, isa13, gs06, st02, message_id, mic_sha256)
 		 SELECT $1::uuid, $2, $3, (SELECT saga_id FROM saga_steps WHERE idem_key = $5),
 		        (SELECT step_no FROM saga_steps WHERE idem_key = $5), $4, $5, $6, $7, $8, $9, $10, $11`,
-		docID, tenantID, spec.PartnerID, outboxID, key, spec.ST01, env.ISA13, env.GS06, env.ST02, t.MessageID, sum); err != nil {
+		docID, tenantID, partnerID, outboxID, key, st01, env.ISA13, env.GS06, env.ST02, t.MessageID, sum); err != nil {
 		return fmt.Errorf("record the outgoing document: %w", err)
 	}
 	numbers, err := json.Marshal(map[string]string{"isa13": env.ISA13, "gs06": env.GS06, "st02": env.ST02})
@@ -147,7 +156,7 @@ func (s *Store) enqueue(ctx context.Context, tx pgx.Tx, tenantID string, key []b
 	}
 	return appendAudit(ctx, tx, AuditEvent{
 		TenantID: tenantID, EventType: "outbound_queued", TraceID: "outbox", PrincipalID: "gateway", IdemKey: key,
-		PayloadSHA256: sum, Outcome: spec.ST01, ControlNumbers: numbers,
+		PayloadSHA256: sum, Outcome: st01, ControlNumbers: numbers,
 	})
 }
 

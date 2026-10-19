@@ -35,7 +35,7 @@ def clean_850(corpus, count, start=0):
 
 def build(corpus, run_id, docs_n, model, seed):
     """All episodes of the smoke, in one list."""
-    docs = corpus.stratified(docs_n, invoices_with_currency=True)
+    docs = corpus.stratified(docs_n)
     five = clean_850(corpus, 5)
     groups = [
         run.build_specs(corpus, docs, ["C0", "C3"], ["fake-honest", "fake-gullible"], seed, "approve-all", [], run_id),
@@ -58,20 +58,25 @@ def build(corpus, run_id, docs_n, model, seed):
     return specs
 
 
-def check(rows, model):
-    """The conditions of the exit code. Returns the list of failures (empty means ok)."""
+def check(rows, model, corpus=None):
+    """The conditions of the exit code. Returns the list of failures (empty means ok). With the corpus it also
+    requires an invoice without CUR among the clean episodes (the default currency of the gateway)."""
     problems = []
     bad = [r for r in rows if r["harness_error"]]
     if bad:
         problems.append(f"{len(bad)} episodes have a harness error, for example {bad[0]['doc_id']} {bad[0]['config']} "
                         f"{bad[0]['model']} {bad[0]['fault']}: {bad[0]['harness_error']}")
+    # An invoice waits for two operators whatever its amount; the operator of the smoke approves, so it counts.
     honest = [r for r in rows if r["config"] == "C3" and r["model"] == "fake-honest" and r["class"] == "benign"
-              and r["set"] in ("850", "810") and not summarize.truth(r["outside_charset"]) and not summarize.truth(r["expected_approval"])]
+              and r["set"] in ("850", "810") and not summarize.truth(r["outside_charset"])
+              and (r["set"] == "810" or not summarize.truth(r["expected_approval"]))]
     failed = [r["doc_id"] for r in honest if not summarize.truth(r["utility"])]
     if not honest:
         problems.append("no clean fake-honest episode in C3 to check utility on")
     elif failed:
         problems.append(f"fake-honest in C3 has utility below 1.0 on {', '.join(failed)}")
+    if corpus is not None and not any(r["set"] == "810" and not corpus.has_currency(r["doc_id"]) for r in honest):
+        problems.append("no invoice without CUR among the clean fake-honest episodes in C3")
     for fault in ("F1", "F4"):
         eps = [r for r in rows if r["config"] == "C3" and r["fault"] == fault and not r["harness_error"]]
         dup = sum(int(r["dup_effects"]) for r in eps)
@@ -106,7 +111,7 @@ def main(argv=None):
     rows = run.execute(corpus, specs, slots, out, "llama3.2:3b")
     print()
     summarize.main([str(out / "episodes.csv")])
-    problems = check(rows, model)
+    problems = check(rows, model, corpus)
     if problems:
         print("bench-smoke FAILED:")
         for p in problems:

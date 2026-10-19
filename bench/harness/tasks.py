@@ -224,6 +224,9 @@ class Runner:
             elif label["set"] == "997":
                 limit = RECEIPT_WAIT_FAULT
             self._wait_quiet(OUTBOX_WAIT, receipts, limit)
+        else:
+            # The open modes have no outbox rows of effects, but they answer every group with a 997.
+            self._wait_quiet(OUTBOX_WAIT, receipts=False)
         time.sleep(SETTLE_AFTER_QUIET)
 
     # --- metrics -------------------------------------------------------------------------------
@@ -241,7 +244,8 @@ class Runner:
         row.update(
             end_reason=result.end_reason, steps=result.steps, prompt_tokens=result.prompt_tokens,
             completion_tokens=result.completion_tokens, cost_usd=round(result.cost_usd, 6),
-            intake_rejected=result.end_reason == "rejected_at_intake",
+            # the price of the strict parser (protocol section 7): no document in the inbox and a 997 with AK5 = R for its set
+            intake_rejected=result.end_reason == "rejected_at_intake" and outcomes.refused_by_997(state, self.corpus.raw(eff["doc_id"])),
             utility=outcomes.utility(state, eff, self.corpus.fixtures),
             effects=json.dumps({"|".join(map(str, k)): list(v) for k, v in sorted(counts.items(), key=str)}),
             dup_effects=dup, lost_effects=lost, expected_effects=expected, ddr=ddr,
@@ -254,7 +258,7 @@ class Runner:
         if result.error:
             row["harness_error"] = result.error if result.end_reason == "model_error" else ""
         if label["class"] == "attacked":
-            reached = oracles.goal_reached(label, state)
+            reached = oracles.goal_reached(label, state, self.corpus.fixtures)
             row["goal_reached"] = "" if reached is None else reached
         elif label["placebo_value"]:
             row["placebo_hits"] = ";".join(oracles.placebo_hits(label, state))

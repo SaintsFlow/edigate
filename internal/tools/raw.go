@@ -109,7 +109,13 @@ func ReadDocumentRaw(ctx context.Context, st *store.Store, tenantID string, in R
 			texts = append(texts, RawText{SegmentPath: n.SegmentPath, Text: n.Text})
 		}
 	}
-	return RawDocumentOutput{ID: d.ID, ST01: d.ST01, Status: d.Status, Header: header, Lines: lines, Texts: texts, Notes: []Note{}}, nil
+	// The addresses of the partner are trusted data of the gateway, not the text of the document; the open
+	// modes list them too, so that an agent of C0 can answer a question as well as an agent of C3.
+	contacts, err := st.PartnerContacts(ctx, tenantID, d.PartnerID)
+	if err != nil {
+		return RawDocumentOutput{}, err
+	}
+	return RawDocumentOutput{ID: d.ID, ST01: d.ST01, Status: d.Status, Header: headerWithContacts{header, contacts}, Lines: lines, Texts: texts, Notes: []Note{}}, nil
 }
 
 // bodyOf is the body an effect is built from: the stored one, or in the mode no-sanitize the

@@ -47,6 +47,42 @@ func (s *Store) OrderSource(ctx context.Context, tenantID, documentID, st01 stri
 	return d, err
 }
 
+// PriceListID reads the label of the price list of the tenant; nil when none is set.
+func (s *Store) PriceListID(ctx context.Context, tenantID string) (*string, error) {
+	var label *string
+	err := s.pool.QueryRow(ctx, `SELECT price_list_id FROM tenants WHERE id = $1`, tenantID).Scan(&label)
+	if isNoRows(err) {
+		return nil, nil
+	}
+	return label, err
+}
+
+// SetPriceListID sets (or with "" clears) the label of the price list of a tenant. It is part
+// of the starting data and is not reachable from any tool. ErrNotFound for an unknown tenant.
+func (s *Store) SetPriceListID(ctx context.Context, tenantID, label string) error {
+	tag, err := s.pool.Exec(ctx, `UPDATE tenants SET price_list_id = NULLIF($2, '') WHERE id = $1`, tenantID, label)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// DefaultCurrency is the currency of a document that names none: the currency of the partner,
+// else the currency of the tenant. ErrNotFound when the partner is not registered.
+func (s *Store) DefaultCurrency(ctx context.Context, tenantID, partnerID string) (string, error) {
+	var cur string
+	err := s.pool.QueryRow(ctx,
+		`SELECT COALESCE(p.currency, t.currency)::text FROM partners p JOIN tenants t ON t.id = p.tenant_id
+		 WHERE p.tenant_id = $1 AND p.partner_id = $2`, tenantID, partnerID).Scan(&cur)
+	if isNoRows(err) {
+		return "", ErrNotFound
+	}
+	return cur, err
+}
+
 // Price is a row of the price list; UnitPrice is a decimal string with two places.
 type Price struct {
 	UnitPrice string
@@ -414,23 +450,38 @@ type Claim struct {
 // (invariant I5): the 855 does not leave before the order exists in the ERP. Rows of the
 // effect types in skip are left alone (a relay that cannot deliver them).
 func (s *Store) ClaimOutbox(ctx context.Context, skip ...string) (*Claim, error) {
+	return s.claimOutbox(ctx, nil, skip)
+}
+
+// ClaimOutboxOnly is ClaimOutbox for a relay that delivers rows of the given effect types only
+// (the open modes, which have no other rows than the 997 of the intake).
+func (s *Store) ClaimOutboxOnly(ctx context.Context, only ...string) (*Claim, error) {
+	return s.claimOutbox(ctx, only, nil)
+}
+
+func (s *Store) claimOutbox(ctx context.Context, only, skip []string) (*Claim, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return nil, err
 	}
 	c := &Claim{tx: tx}
+	// Empty lists, not NULL: "<> ALL(NULL)" would match nothing.
 	if skip == nil {
-		skip = []string{} // an empty list, not NULL: "<> ALL(NULL)" would match nothing
+		skip = []string{}
+	}
+	if only == nil {
+		only = []string{}
 	}
 	err = tx.QueryRow(ctx,
 		`SELECT id, tenant_id, idem_key, effect_type, payload, attempts FROM outbox
 		 WHERE status = 'pending' AND next_attempt_at <= now() AND effect_type <> ALL($1::text[])
+		   AND (cardinality($2::text[]) = 0 OR effect_type = ANY($2::text[]))
 		   AND NOT EXISTS (
 		       SELECT 1 FROM saga_steps cur
 		       JOIN saga_steps prev ON prev.saga_id = cur.saga_id AND prev.step_no < cur.step_no
 		       JOIN idempotency_keys pk ON pk.key = prev.idem_key
 		       WHERE cur.idem_key = outbox.idem_key AND pk.state <> 'completed')
-		 ORDER BY id LIMIT 1 FOR UPDATE SKIP LOCKED`, skip).
+		 ORDER BY id LIMIT 1 FOR UPDATE SKIP LOCKED`, skip, only).
 		Scan(&c.Row.ID, &c.Row.TenantID, &c.Row.Key, &c.Row.EffectType, &c.Row.Payload, &c.Row.Attempts)
 	if isNoRows(err) {
 		_ = tx.Rollback(ctx)

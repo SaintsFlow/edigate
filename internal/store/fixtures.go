@@ -109,9 +109,10 @@ func (s *Store) LoadFixtures(ctx context.Context, f Fixtures) error {
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	if _, err := tx.Exec(ctx,
-		`INSERT INTO tenants (id, name, interchange_id) VALUES ($1, $1, NULLIF($2, ''))
-		 ON CONFLICT (id) DO UPDATE SET interchange_id = COALESCE(EXCLUDED.interchange_id, tenants.interchange_id)`,
-		f.TenantID, f.InterchangeID); err != nil {
+		`INSERT INTO tenants (id, name, interchange_id, currency) VALUES ($1, $1, NULLIF($2, ''), COALESCE(NULLIF($3, ''), 'USD'))
+		 ON CONFLICT (id) DO UPDATE SET interchange_id = COALESCE(EXCLUDED.interchange_id, tenants.interchange_id),
+		                                currency = COALESCE(NULLIF($3, ''), tenants.currency)`,
+		f.TenantID, f.InterchangeID, f.Currency); err != nil {
 		return err
 	}
 	for _, p := range f.Partners {

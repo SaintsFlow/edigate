@@ -69,6 +69,7 @@ const usage = `usage:
   edigatectl partner add --tenant T --partner Q:ID --role customer|supplier --name N
   edigatectl token issue --tenant T --kind agent|operator|admin|partner --id P [--partner ISA05:ISA06]
   edigatectl token revoke --id P
+  edigatectl price-list-id set --tenant T <label>
   edigatectl call --url URL --token TOKEN <tool> [JSON-arguments]
   edigatectl parse <file>
   edigatectl send --url URL --token T --from Q:ID --to Q:ID --file F [--message-id ID]
@@ -119,6 +120,11 @@ func run(ctx context.Context, args []string, stdout io.Writer) error {
 			return partnerAdd(ctx, args[2:], stdout)
 		}
 		return usageError{"partner: expected: add --tenant T --partner Q:ID --role customer|supplier --name N"}
+	case "price-list-id":
+		if len(args) >= 2 && args[1] == "set" {
+			return priceListIDSet(ctx, args[2:], stdout)
+		}
+		return usageError{"price-list-id: expected: set --tenant T <label>"}
 	case "parse":
 		return parseFile(args[1:], stdout)
 	case "send":
@@ -190,6 +196,28 @@ func tenantAdd(ctx context.Context, id, name string, flags []string, out io.Writ
 			return err
 		}
 		fmt.Fprintln(out, "tenant ready:", id)
+		return nil
+	})
+}
+
+// priceListIDSet sets the label that erp.get_price_list returns in every answer of the tenant
+// (starting data, written straight to the database). The benchmark puts its canary there.
+func priceListIDSet(ctx context.Context, args []string, out io.Writer) error {
+	fs := flag.NewFlagSet("price-list-id set", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	tenant := fs.String("tenant", "", "")
+	if err := fs.Parse(args); err != nil || fs.NArg() != 1 || *tenant == "" {
+		return usageError{"price-list-id set: --tenant T and one label are required"}
+	}
+	label := fs.Arg(0)
+	if len(label) > 200 || x12.Printable(label) != label {
+		return usageError{"price-list-id set: the label is at most 200 printable ASCII characters"}
+	}
+	return withStore(ctx, func(st *store.Store) error {
+		if err := st.SetPriceListID(ctx, *tenant, label); err != nil {
+			return fmt.Errorf("set the price list label: %w", err)
+		}
+		fmt.Fprintln(out, "price list label set:", *tenant)
 		return nil
 	})
 }

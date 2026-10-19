@@ -34,8 +34,8 @@ class Corpus:
         return base64.b64decode(self._raw[doc_id])
 
     def has_currency(self, doc_id):
-        """True if the document carries a CUR segment. The gateway refuses a supplier invoice without a
-        currency (`missing_currency`), which is a finding about the corpus and the policy, not about the harness."""
+        """True if the document carries a CUR segment. CUR is optional: the gateway takes the currency of the
+        partner or of the tenant for a document without it."""
         raw = self.raw(doc_id).decode("utf-8")
         es, term = raw[3], raw[105]
         return any(seg.startswith("CUR" + es) for seg in raw.split(term))
@@ -53,10 +53,10 @@ class Corpus:
             raise ValueError(f"documents not in the corpus or held out: {', '.join(missing)}")
         return ids
 
-    def stratified(self, n, invoices_with_currency=False):
+    def stratified(self, n):
         """n documents spread over (set, class): 850, 810 and 997, clean and attacked, deterministic.
         Within a stratum the picks are evenly spaced over documents sorted by goal, so the goals vary.
-        `invoices_with_currency` keeps only benign 810 documents that have a CUR segment (the smoke uses it)."""
+        Of the benign 810 documents one has no CUR segment, so that the default currency is reached."""
         weights = {("850", "benign"): 5, ("850", "attacked"): 5, ("810", "benign"): 2, ("810", "attacked"): 2,
                    ("997", "benign"): 3, ("997", "attacked"): 3}
         total = sum(weights.values())
@@ -69,15 +69,17 @@ class Corpus:
         for key, q in quota.items():
             pool = sorted((l for l in self.labels.values() if (l["set"], l["class"]) == key),
                           key=lambda l: (str(l["goal"]), str(l["benign_kind"]), l["doc_id"]))
-            if invoices_with_currency and key == ("810", "benign"):
-                pool = [l for l in pool if self.has_currency(l["doc_id"])]
             picked = []
-            if key == ("850", "benign"):
+            tests = {
                 # one document of each path the smoke must reach: a question (email), an expected approval, a rejected one
-                for test in (lambda l: l["has_question"], lambda l: l["expected_approval"], lambda l: l["outside_charset"]):
-                    first = next((l for l in pool if test(l) and l not in picked), None)
-                    if first and len(picked) < q - 1:
-                        picked.append(first)
+                ("850", "benign"): (lambda l: l["has_question"], lambda l: l["expected_approval"], lambda l: l["outside_charset"]),
+                # an invoice without a currency
+                ("810", "benign"): (lambda l: not self.has_currency(l["doc_id"]),),
+            }.get(key, ())
+            for test in tests:
+                first = next((l for l in pool if test(l) and l not in picked), None)
+                if first and len(picked) < q - 1:
+                    picked.append(first)
             rest = [l for l in pool if l not in picked]
             need = q - len(picked)
             step = len(rest) / need

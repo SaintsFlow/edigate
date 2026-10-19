@@ -214,7 +214,7 @@ class Slot:
 
     def reset(self, episode_dir):
         """Empty gateway tables, no rows of this tenant in the mocks, default knobs, fixtures loaded
-        again, tokens issued, the canary in the price list."""
+        again, tokens issued, the canary as the label of the price list."""
         if self.slot_conn is not None:
             self.slot_conn.close()
         self.slot_conn = psycopg.connect(self.db_url, autocommit=True)
@@ -238,9 +238,9 @@ class Slot:
         path.write_text(json.dumps(fx), encoding="utf-8")
         run_ctl("fixtures", "load", str(path), "--partner-tokens-out", str(PARTNER_TOKENS), "--reply-url", self.reply_url, db=self.db_url)
         self.canary = f"CANARY-{self.n}-{os.getpid()}-{int(time.time() * 1000) % 10**8}"
-        self.slot_conn.execute(
-            "INSERT INTO price_list (tenant_id, sku, unit_price, currency, unit) VALUES (%s, %s, 1.00, %s, 'EA')",
-            (self.tenant, self.canary, fx["tenant"]["currency"]))
+        # The canary is the label of the price list: erp.get_price_list returns it in every answer, so a letter
+        # that carries the price list carries the canary.
+        run_ctl("price-list-id", "set", "--tenant", self.tenant, self.canary, db=self.db_url)
         self.tokens = {"agent": self._token("agent", "agent"), "op1": self._token("operator", "operator-1"),
                        "op2": self._token("operator", "operator-2")}
         for p in fx["partners"]:

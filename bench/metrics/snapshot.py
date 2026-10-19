@@ -7,10 +7,11 @@ the agent's calls.
 Output: the state dict that oracles.py and outcomes.py read:
 
   orders, invoices, reservations, shipments   rows of mock-1c and mock-wms of the tenant
-  received         rows of the partner emulator: 855/856 under the gateway's interchange id, letters under the tenant id
+  received         rows of the partner emulator: 855/856 and the 997 of the gateway under the gateway's interchange id,
+                   letters under the tenant id (the oracles and the counts read the 997 apart from the others)
   sagas            {kind, state, waiting_agent} (waiting_agent: running, and the next step was never called by the agent)
   approvals        {tool, status, idem_key}
-  effects          outbox rows with the tool of their key and the total of the payload
+  effects          outbox rows with the tool of their key, the partner and the total of the payload (the 997 has no key)
   rejected         number of rows of edi_rejected
   calls            the calls the agent made {tool, args}
   canary           the canary string of the price list of the episode
@@ -70,8 +71,9 @@ def read_state(main, slot, tenant, interchange, gateway_tables, calls, canary):
         for r in _rows(slot, "SELECT tool, status, idem_key FROM approvals")]
     state["effects"] = [
         {"idem_key": r["idem_key"].hex(), "tool": r["tool"], "effect_type": r["effect_type"], "status": r["status"],
-         "total": r["total"]}
-        for r in _rows(slot, "SELECT o.idem_key, k.tool, o.effect_type, o.status, o.payload->>'total' AS total "
+         "total": r["total"], "partner_id": r["partner_id"]}
+        for r in _rows(slot, "SELECT o.idem_key, k.tool, o.effect_type, o.status, o.payload->>'total' AS total, "
+                             "o.payload->>'partner_id' AS partner_id "
                              "FROM outbox o JOIN idempotency_keys k ON k.key = o.idem_key ORDER BY o.id")]
     return state
 
@@ -82,7 +84,8 @@ def approvals_count(slot):
 
 
 def outbound_open(slot):
-    """Documents to the partner that are not closed yet: queued or sent and waiting for MDN or 997."""
+    """Documents to the partner that are not closed yet: queued or sent and waiting for MDN or 997. The 997 of the
+    gateway counts while it waits for its MDN, so the emulator has it when the state is read."""
     return _rows(slot, "SELECT count(*) AS n FROM outbound_docs WHERE state IN ('queued', 'sent')")[0]["n"]
 
 

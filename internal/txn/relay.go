@@ -52,6 +52,7 @@ type Relay struct {
 	Store   *store.Store
 	Adapter adapters.Adapter
 	AS2     Transmitter // nil: rows of documents for partners stay queued
+	Only    []string    // if set, the relay delivers rows of these effect types only (the open modes: the 997 of the intake)
 	Workers int         // parallel workers; at least 1
 	Scale   float64     // pauses are divided by it (EDIGATE_TIME_SCALE); 0 means 1
 	Log     *slog.Logger
@@ -103,16 +104,26 @@ func (r *Relay) work(ctx context.Context) {
 // Step handles one due outbox row. It reports false when there was none. An
 // error means the row stays as it was (the transaction is rolled back).
 func (r *Relay) Step(ctx context.Context) (bool, error) {
-	var skip []string
-	if r.AS2 == nil {
-		skip = []string{adapters.EffectSend855, adapters.EffectSend856}
+	var claim *store.Claim
+	var err error
+	switch {
+	case len(r.Only) > 0:
+		claim, err = r.Store.ClaimOutboxOnly(ctx, r.Only...)
+	case r.AS2 == nil:
+		claim, err = r.Store.ClaimOutbox(ctx, adapters.EffectSend855, adapters.EffectSend856, adapters.EffectSend997)
+	default:
+		claim, err = r.Store.ClaimOutbox(ctx)
 	}
-	claim, err := r.Store.ClaimOutbox(ctx, skip...)
 	if err != nil || claim == nil {
 		return false, err
 	}
 	defer claim.Release(ctx)
-	r.Chaos.maybeExit(r.Chaos.exitBeforeSend())
+	// The fault injection is about the effects of an agent and the documents it causes. The 997 of
+	// the intake exists before any agent acts, and a process that dies there would die before the
+	// episode of the benchmark has started.
+	if claim.Row.EffectType != adapters.EffectSend997 {
+		r.Chaos.maybeExit(r.Chaos.exitBeforeSend())
+	}
 	if adapters.IsSend(claim.Row.EffectType) {
 		return true, r.sendDocument(ctx, claim)
 	}

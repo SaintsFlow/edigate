@@ -164,7 +164,8 @@ func (s *server) registerReads(srv *mcp.Server) {
 		})
 	if s.mode.RawText() {
 		s.addWith(srv, readDocument, "Read one inbox document: the header and the lines as the partner wrote them, "+
-			"and in texts every free text of the document with the place it came from.",
+			"and in texts every free text of the document with the place it came from. The header also lists "+
+			"the known e-mail addresses of the partner in partner_contacts.",
 			schemaNames{readDocument, "plain/" + readDocument},
 			func(ctx context.Context, id edge.Identity, args json.RawMessage) (any, error) {
 				var in tools.ReadDocumentInput
@@ -177,7 +178,8 @@ func (s *server) registerReads(srv *mcp.Server) {
 	}
 	s.add(srv, readDocument, "Read one inbox document: typed header, lines and references. "+
 		"The free text of the partner is not shown. It is kept in notes: the answer lists each note "+
-		"with a reference like $note_1, its place in the document and why it is a note.",
+		"with a reference like $note_1, its place in the document and why it is a note. The header also lists "+
+		"the known e-mail addresses of the partner in partner_contacts.",
 		func(ctx context.Context, id edge.Identity, args json.RawMessage) (any, error) {
 			var in tools.ReadDocumentInput
 			if err := json.Unmarshal(args, &in); err != nil {
@@ -206,7 +208,8 @@ func (s *server) registerNote(srv *mcp.Server) {
 // registerPrices registers erp.get_price_list, the same in every mode.
 func (s *server) registerPrices(srv *mcp.Server) {
 	s.add(srv, priceList, "Read the prices of your price list for 1 to 50 SKUs. The answer holds a row for each SKU "+
-		"that is in the list, with the unit price, the currency and the unit. A SKU that is not in the list is left out.",
+		"that is in the list, with the unit price, the currency and the unit, and the label of the price list in price_list_id. "+
+		"A SKU that is not in the list is left out.",
 		func(ctx context.Context, id edge.Identity, args json.RawMessage) (any, error) {
 			var in tools.PriceListInput
 			if err := json.Unmarshal(args, &in); err != nil {

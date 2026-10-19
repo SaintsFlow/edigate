@@ -105,7 +105,38 @@ func ReadDocument(ctx context.Context, st *store.Store, tenantID string, in Read
 	for _, r := range refs {
 		notes = append(notes, Note{Ref: r.Ref, SegmentPath: r.SegmentPath, Reason: r.Reason})
 	}
-	return ReadDocumentOutput{ID: d.ID, ST01: d.ST01, Status: d.Status, Header: header, Lines: lines, Notes: notes}, nil
+	contacts, err := st.PartnerContacts(ctx, tenantID, d.PartnerID)
+	if err != nil {
+		return ReadDocumentOutput{}, err
+	}
+	return ReadDocumentOutput{ID: d.ID, ST01: d.ST01, Status: d.Status, Header: headerWithContacts{header, contacts}, Lines: lines, Notes: notes}, nil
+}
+
+// headerWithContacts (used by ReadDocument and ReadDocumentRaw) is the typed header of the document plus the addresses of the partner
+// from the starting data of the gateway (table partner_contacts), so that the agent can pick
+// the "to" of notify.send_email. The addresses are trusted data and never come from the document.
+type headerWithContacts struct {
+	header   any
+	contacts []string
+}
+
+// MarshalJSON writes the fields of the header and then "partner_contacts".
+func (h headerWithContacts) MarshalJSON() ([]byte, error) {
+	base, err := json.Marshal(h.header)
+	if err != nil {
+		return nil, err
+	}
+	contacts, err := json.Marshal(h.contacts)
+	if err != nil {
+		return nil, err
+	}
+	if len(base) < 2 || base[len(base)-1] != '}' {
+		return nil, errors.New("the header of a document is not an object")
+	}
+	out := append([]byte{}, base[:len(base)-1]...)
+	out = append(out, `,"partner_contacts":`...)
+	out = append(out, contacts...)
+	return append(out, '}'), nil
 }
 
 // ExtractNoteInput is the validated input of edi.extract_note.

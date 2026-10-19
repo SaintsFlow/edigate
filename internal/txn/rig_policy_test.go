@@ -50,7 +50,11 @@ func (r *rig) send810(tenant, partnerID, token, isa13, gs06, big02, big04, tds s
 		name := strings.TrimPrefix(id, "ZZ:")
 		return name + strings.Repeat(" ", 15-len(name))
 	}
-	body := "BIG*20261018*" + big02 + "*20261018*" + big04 + "~CUR*SE*USD~N1*BY*TEST BUYER*92*B001~"
+	cur := "CUR*SE*USD~"
+	if r.noCUR {
+		cur = ""
+	}
+	body := "BIG*20261018*" + big02 + "*20261018*" + big04 + "~" + cur + "N1*BY*TEST BUYER*92*B001~"
 	for i, l := range lines {
 		body += fmt.Sprintf("IT1*%d*%s*EA*%s**VN*%s~", i+1, l.qty, l.price, l.sku)
 	}
@@ -65,6 +69,25 @@ func (r *rig) send810(tenant, partnerID, token, isa13, gs06, big02, big04, tds s
 	}
 	return r.text(`SELECT d.id::text FROM edi_documents d JOIN edi_interchanges i ON i.id = d.interchange_id
 	               WHERE d.tenant_id = $1 AND i.isa13 = $2 AND i.counterparty_id = $3`, tenant, isa13, partnerID)
+}
+
+// dropAcks takes the 997 the gateway queued for an interchange out of the tables and gives its
+// control numbers back. The tests of the effects count outbox rows and outgoing documents and
+// are about the 855 and the 856, not about the acknowledgment of the intake; a test of the 997
+// sets rig.keepAcks. Nothing has sent the 997 yet: the relay of the rig runs only when stepped.
+func (r *rig) dropAcks() {
+	r.t.Helper()
+	if r.keepAcks {
+		return
+	}
+	r.exec(`UPDATE control_numbers c SET last_value = c.last_value - a.n
+	        FROM (SELECT tenant_id, partner_id, count(*) AS n FROM outbound_docs WHERE st01 = '997' GROUP BY 1, 2) a
+	        WHERE c.tenant_id = a.tenant_id AND c.partner_id = a.partner_id`)
+	r.exec(`DELETE FROM edi_interchanges i USING outbound_docs d
+	        WHERE d.st01 = '997' AND i.direction = 'out' AND i.tenant_id = d.tenant_id AND i.counterparty_id = d.partner_id AND i.isa13 = d.isa13`)
+	r.exec(`DELETE FROM outbound_docs WHERE st01 = '997'`)
+	r.exec(`DELETE FROM outbox WHERE effect_type = 'edi.send_997'`)
+	r.exec(`DELETE FROM control_numbers WHERE last_value = 0`)
 }
 
 // postInbound posts an interchange to /edi/inbound. The entrance allows a partner two
@@ -84,6 +107,9 @@ func (r *rig) postInbound(raw, tenant, partnerID, token, isa13 string) (int, []b
 		answer, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
 		if resp.StatusCode != http.StatusTooManyRequests {
+			if resp.StatusCode == http.StatusOK {
+				r.dropAcks()
+			}
 			return resp.StatusCode, answer
 		}
 		time.Sleep(300 * time.Millisecond)

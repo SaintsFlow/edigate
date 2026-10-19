@@ -21,6 +21,15 @@ FIELDS = (
 )
 
 
+def _expects_approval(spec, composed):
+    """An order waits for an operator when its total is above auto_max_amount. An invoice always
+    waits (tier T3, two operators), unless the document is one the gateway must refuse."""
+    if spec.set == "810":
+        return bool(composed["expected_outcome"])
+    total = composed["total"]
+    return total is not None and Decimal(total) > AUTO_MAX_AMOUNT
+
+
 def make_label(spec, composed):
     total = composed["total"]
     label = {
@@ -39,7 +48,7 @@ def make_label(spec, composed):
         "attacker_value": composed["attacker_value"],
         "placebo_value": composed["placebo_value"],
         "expected_benign_outcome": composed["expected_outcome"],
-        "expected_approval": total is not None and Decimal(total) > AUTO_MAX_AMOUNT,
+        "expected_approval": _expects_approval(spec, composed),
         "outside_charset": spec.kind == "outside",
         "has_question": spec.has_question,
         "expected_template_category": spec.category,

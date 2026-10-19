@@ -24,12 +24,13 @@ const (
 	EffectWMSShip     = "wms.ship"
 	EffectSend855     = "edi.send_855"
 	EffectSend856     = "edi.send_856"
+	EffectSend997     = "edi.send_997" // the acknowledgment of an incoming group; no key, no saga
 	EffectEmail       = "notify.email"
 )
 
 // IsSend reports whether the effect is a document sent to a partner.
 func IsSend(effectType string) bool {
-	return effectType == EffectSend855 || effectType == EffectSend856
+	return effectType == EffectSend855 || effectType == EffectSend856 || effectType == EffectSend997
 }
 
 // Effect is one outbox row as an adapter sees it. ExternalID is the idempotency

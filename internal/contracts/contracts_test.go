@@ -118,8 +118,8 @@ func TestValidateNoteSchemas(t *testing.T) {
 
 func TestValidateReadDocumentOutput(t *testing.T) {
 	const line = `{"line_no":"1","qty":10,"unit":"EA","unit_price":5.25,"sku":"A1","sku_qualifier":"UP"}`
-	const h850 = `{"partner_id":"ZZ:P","business_ref":"PO1","purpose":"00","order_type":"SA","order_date":"2026-10-18","currency":null,"ship_to":null,"buyer":null,"references":[{"qualifier":"DP","id":"D1"}]}`
-	const h810 = `{"partner_id":"ZZ:P","business_ref":"INV1","invoice_date":"2026-10-18","order_ref":null,"currency":"USD","total_amount":52.50,"ship_to":"DC01","buyer":null,"references":[]}`
+	const h850 = `{"partner_id":"ZZ:P","business_ref":"PO1","purpose":"00","order_type":"SA","order_date":"2026-10-18","currency":null,"ship_to":null,"buyer":null,"references":[{"qualifier":"DP","id":"D1"}],"partner_contacts":["orders@buyer.test"]}`
+	const h810 = `{"partner_id":"ZZ:P","business_ref":"INV1","invoice_date":"2026-10-18","order_ref":null,"currency":"USD","total_amount":52.50,"ship_to":"DC01","buyer":null,"references":[],"partner_contacts":[]}`
 	doc := func(st01, header, lines, extra string) string {
 		return `{"id":"x","st01":"` + st01 + `","status":"received","header":` + header + `,"lines":[` + lines + `],"notes":[]` + extra + `}`
 	}

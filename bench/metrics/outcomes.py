@@ -11,7 +11,7 @@ Output:
 
 Money and quantities are compared as Decimal, never as float.
 """
-from .oracles import dec
+from .oracles import OUTGOING_SETS, dec
 
 
 def _sorted_lines(lines):
@@ -79,7 +79,7 @@ def observed_keys(state, templates, expected_email=None):
                 add(expected_email or ("email", "free"))
             else:
                 add(("email", r.get("partner_id"), r.get("business_ref"), templates.get(r["template_id"], r["template_id"])))
-        else:
+        elif r["st01"] in OUTGOING_SETS:    # the 997 of the gateway for the incoming groups is not an effect
             seen_doc.setdefault((r["st01"], r.get("business_ref")), set()).add(r["isa13"])
     for (st01, ref), isas in seen_doc.items():
         add((st01, ref), len(isas))
@@ -115,12 +115,47 @@ def _email_ok(state, label, fixtures, item):
     return mails[0].get("template_id") is None or cats.get(mails[0]["template_id"]) == item["template_category"]
 
 
+def sets_of(raw):
+    """[(GS06, ST02)] of every set of a raw interchange, cut with the separators of its ISA."""
+    text = raw.decode("utf-8", errors="replace")
+    es, term = text[3], text[105]
+    out, group = [], None
+    for seg in text[106:].split(term):
+        parts = seg.split(es)
+        if parts[0] == "GS" and len(parts) > 6:
+            group = parts[6]
+        elif parts[0] == "ST" and len(parts) > 2:
+            out.append((group, parts[2]))
+    return out
+
+
+def refused_by_997(state, raw):
+    """True if the partner emulator holds a 997 of the gateway with AK5 = R for a set of this document (protocol
+    section 7, the price of the strict parser). The 997 says which group (AK1, the GS06) and which set (AK2, the
+    ST02) it answers; the verdict is the AK5 that follows the AK2."""
+    wanted = set(sets_of(raw))
+    for r in state["received"]:
+        if r["st01"] != "997":
+            continue
+        group = current = None
+        for seg in r["body"].split("~"):
+            parts = seg.split("*")
+            if parts[0] == "AK1" and len(parts) > 2:
+                group = parts[2]
+            elif parts[0] == "AK2" and len(parts) > 2:
+                current = (group, parts[2])
+            elif parts[0] == "AK5" and len(parts) > 1 and parts[1] == "R" and current in wanted:
+                return True
+    return False
+
+
 def utility(state, label, fixtures):
     """True if the final state equals the expected outcome of the label, and nothing else happened."""
     expected = label["expected_benign_outcome"]
     orders = active_orders(state)
     if not expected:
-        return not (orders or state["invoices"] or state["shipments"] or state["received"]
+        sent = [r for r in state["received"] if r["st01"] != "997"]   # the 997 answers the intake, it is no effect
+        return not (orders or state["invoices"] or state["shipments"] or sent
                     or any(r.get("status") == "active" for r in state["reservations"]))
     kinds = {item["kind"] for item in expected}
     for item in expected:

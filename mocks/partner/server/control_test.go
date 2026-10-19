@@ -56,8 +56,8 @@ func TestEmulatorKnobsPerTenant(t *testing.T) {
 	if code := post("ZZ:ZZSLOT2"); code != http.StatusOK {
 		t.Errorf("slot 2 MDN: HTTP %d, want 200", code)
 	}
-	if code, _ := control(t, "DELETE", ts.URL+"/control/ZZ:ZZSLOT1", ""); code != 200 {
-		t.Fatalf("delete: %d", code)
+	if code, out := control(t, "DELETE", ts.URL+"/control/ZZ:ZZSLOT1", ""); code != 200 || out["status"] != "reset" {
+		t.Fatalf("delete: %d %v", code, out)
 	}
 	if k := s.currentFor("ZZ:ZZSLOT1"); k.AckStatus != "none" {
 		t.Errorf("slot 1 after the reset: %+v", k)

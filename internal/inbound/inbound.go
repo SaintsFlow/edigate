@@ -15,6 +15,10 @@
 // (a repeat of the same interchange returns the first MDN, another body under the
 // same ISA13 is refused) -> one audit row.
 //
+// For every functional group of 850 or 810 of a new interchange the same transaction queues a
+// 997 to the partner (wave 2-9c, flow P1): AK5 A for a set the parser accepted, R with the
+// AK3 and AK4 of its errors for a set it refused. The relay sends it like any other document.
+//
 // A 997 is stored like any set and also matched, in the same transaction, to the document
 // the gateway sent (partner that sent it, AK102, AK202): that is how a document becomes
 // delivered or an incident (invariant I6).
@@ -38,6 +42,7 @@ import (
 
 	"github.com/SaintsFlow/edigate/internal/edge"
 	"github.com/SaintsFlow/edigate/internal/edi/document"
+	"github.com/SaintsFlow/edigate/internal/edi/outbound"
 	"github.com/SaintsFlow/edigate/internal/edi/x12"
 	"github.com/SaintsFlow/edigate/internal/rpcerr"
 	"github.com/SaintsFlow/edigate/internal/sanitize"
@@ -204,6 +209,7 @@ func (h *Handler) receive(ctx context.Context, w http.ResponseWriter, r *http.Re
 	saved, err := h.store.SaveInbound(ctx, store.InboundInterchange{
 		TenantID: p.TenantID, PartnerID: p.PartnerID, ISA13: ic.ControlNumber(), MessageID: messageID,
 		Raw: body, SHA256: sum[:], MDN: mdn.bytes(), Documents: docs, Acks: acks,
+		GatewayID: access.GatewayID, Replies: replyAcks(ic, p.PartnerID),
 	})
 	if err != nil {
 		h.log.Error("store interchange failed", "error", err.Error())
@@ -341,6 +347,30 @@ func acksOf(docs []store.InboundDocument) ([]store.InboundAck, error) {
 		out = append(out, ack)
 	}
 	return out, nil
+}
+
+// replyAcks makes the specs of the 997 the gateway sends back: one for every functional group
+// that holds an 850 or an 810. A group of 997 sets (or of sets of other kinds only) gets no
+// reply, so two gateways never answer each other's acknowledgments. Every set of the group is
+// named, with the errors of the strict parser: a set refused for the role of the partner has
+// none, because the 997 reports syntax only.
+func replyAcks(ic *x12.Interchange, partnerID string) []outbound.AckSpec {
+	var out []outbound.AckSpec
+	for gi := range ic.Groups {
+		g := &ic.Groups[gi]
+		spec := outbound.AckSpec{PartnerID: partnerID, GroupCode: g.GS.Value(1), GroupControl: g.GS.Value(6)}
+		business := false
+		for si := range g.Sets {
+			s := &g.Sets[si]
+			st01 := s.ST.Value(1)
+			business = business || st01 == "850" || st01 == "810"
+			spec.Sets = append(spec.Sets, outbound.AckSet{ID: st01, Control: s.ST.Value(2), Errors: s.Errors})
+		}
+		if business {
+			out = append(out, spec)
+		}
+	}
+	return out
 }
 
 // newUUID returns a random version 4 UUID.

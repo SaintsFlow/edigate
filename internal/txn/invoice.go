@@ -36,8 +36,10 @@ type InvoicePayload struct {
 // the normal form the policy compares with the order to the supplier. Anything that
 // does not fit gives a *DenyError: no lines (no_lines), a line without a usable SKU,
 // quantity or price (invalid_line), a missing or malformed total (invalid_total), a
-// missing currency (missing_currency).
-func BuildInvoice(h document.Header810, lines []document.Line, partnerID, ref string) (InvoicePayload, []policy.NormLine, error) {
+// malformed currency (invalid_currency). CUR is optional: a document without it takes
+// defaultCurrency (the currency of the partner, else of the tenant), as an order does through
+// the price list.
+func BuildInvoice(h document.Header810, lines []document.Line, partnerID, ref, defaultCurrency string) (InvoicePayload, []policy.NormLine, error) {
 	explain := map[string]bool{}
 	if len(lines) == 0 {
 		explain["no_lines"] = true
@@ -46,10 +48,12 @@ func BuildInvoice(h document.Header810, lines []document.Line, partnerID, ref st
 	if h.OrderRef != nil {
 		out.OrderRef = *h.OrderRef
 	}
-	if h.Currency == nil || !reCurrencyCode(*h.Currency) {
-		explain["missing_currency"] = true
-	} else {
+	out.Currency = defaultCurrency
+	if h.Currency != nil {
 		out.Currency = *h.Currency
+	}
+	if !reCurrencyCode(out.Currency) {
+		explain["invalid_currency"] = true
 	}
 	total, ok := parseScaled(h.TotalAmount.String(), 2)
 	if !ok {

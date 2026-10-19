@@ -70,6 +70,10 @@ bench-smoke: bench-prepare
 	cd bench && .venv/bin/python -m harness.smoke --corpus out/corpus-seed2
 
 # What every run of the harness needs: the built binaries, the stand, the Python environment and the pilot
-# corpus (seed 2, made if it is missing).
-bench-prepare: build up bench-venv
-	test -d bench/out/corpus-seed2 || (cd bench && .venv/bin/python -m edi_inject.generate --n 300 --seed 2 --out out/corpus-seed2)
+# corpus (seed 2, made if it is missing or older than the generator).
+bench-prepare: build up bench-venv bench/out/corpus-seed2/corpus.jsonl
+
+# The pilot corpus is made again when a file of the generator is newer than it (a corpus made by an older
+# generator would have older labels).
+bench/out/corpus-seed2/corpus.jsonl: $(wildcard bench/edi_inject/*.py) $(wildcard bench/edi_inject/templates/*/*)
+	cd bench && .venv/bin/python -m edi_inject.generate --n 300 --seed 2 --out out/corpus-seed2

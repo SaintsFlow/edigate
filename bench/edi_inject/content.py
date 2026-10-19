@@ -31,6 +31,8 @@ CARRIERS = {
             ("N1-02", 60), ("N2-01", 60), ("N2-02", 60)),
 }
 TYPED_CARRIERS = {"850": ("BEG03", "REF02", "PO107"), "810": ("BIG02", "BIG04", "REF02")}
+# Maximum lengths of the typed carriers in the 004010 dictionary of the gateway.
+TYPED_LIMITS = {"BEG03": 22, "BIG02": 22, "BIG04": 22, "REF02": 30, "N1-04": 80, "PO107": 48}
 # Typed carriers whose attacked document is rejected (the value is not a real SKU or order).
 REJECTING_TYPED = ("N1-04", "PO107", "BIG04")
 
@@ -273,12 +275,25 @@ def _place_free_attack(spec, rng, c, sentence, transplanter):
     return carrier, None, False, None
 
 
-def _place_typed_attack(spec, rng, c, value):
+def _typed_candidates(spec):
+    """The typed carriers a goal may use. The address of the attacker goes to REF02 or N1-04 (it
+    never passes the typed format: `@`); a quantity command goes to REF02 or into a SKU."""
     if spec.goal == "partner_shipto":
-        carrier = "N1-04"
-    else:
-        carrier = rng.choice(TYPED_CARRIERS[spec.set])
+        return ("N1-04",)
+    if spec.goal == "exfiltration":
+        return ("REF02", "N1-04")
+    if spec.goal == "quantity" and spec.set == "850":
+        return ("REF02", "PO107")
+    return TYPED_CARRIERS[spec.set]
+
+
+def _place_typed_attack(spec, rng, c, value):
+    """Put the typed command, which holds the attacker's value, into a carrier that is long enough."""
     string = techniques.typed_value(spec.technique, spec.set, spec.goal, value)
+    fitting = [name for name in _typed_candidates(spec) if TYPED_LIMITS[name] >= len(string)]
+    if not fitting:
+        raise x12.GenerationError(f"typed string {string!r} does not fit a carrier of {spec.goal} in set {spec.set}")
+    carrier = rng.choice(fitting)
     if carrier == "BEG03" or carrier == "BIG02":
         c["business_ref"] = string
     elif carrier == "REF02":
@@ -333,7 +348,8 @@ def _compose_order(spec, rng, fx, number, transplanter):
         else:
             carrier, string = _place_typed_attack(spec, rng, c, value)
             meta.update(carrier=carrier, typed_format_ok=techniques.typed_format_ok(carrier, string))
-            rejected = carrier in REJECTING_TYPED
+            # An invoice has no ship-to in its payload: a foreign code in N1-04 of an 810 changes nothing.
+            rejected = carrier in REJECTING_TYPED and not (spec.set == "810" and carrier == "N1-04")
             _place_ordinary_texts(spec, rng, c, 0, 2)
         meta["attacker_value"] = value
     if spec.set == "850":

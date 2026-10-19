@@ -75,3 +75,38 @@ func TestFixturesLoadWritesPartnerTokens(t *testing.T) {
 		t.Error("a call without a file must be refused")
 	}
 }
+
+// fixtures load stores the currency of the tenant (the last fallback of a document without CUR),
+// and price-list-id set puts the label of the price list into the database straight away.
+func TestTenantCurrencyAndPriceListLabel(t *testing.T) {
+	st, pool := storetest.New(t)
+	t.Setenv("EDIGATE_DB_URL", pool.Config().ConnString())
+	file := filepath.Join(t.TempDir(), "fixtures.json")
+	if err := os.WriteFile(file, []byte(strings.Replace(fixtures, `"currency": "USD"`, `"currency": "EUR"`, 1)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	var out bytes.Buffer
+	if err := fixturesLoad(ctx, []string{file}, &out); err != nil {
+		t.Fatal(err)
+	}
+	var cur string
+	if err := pool.QueryRow(ctx, `SELECT currency FROM tenants WHERE id = 'stand'`).Scan(&cur); err != nil || cur != "EUR" {
+		t.Fatalf("tenant currency = %q %v, want EUR", cur, err)
+	}
+	if label, err := st.PriceListID(ctx, "stand"); err != nil || label != nil {
+		t.Fatalf("label before the command = %v %v, want none", label, err)
+	}
+	if err := run(ctx, []string{"price-list-id", "set", "--tenant", "stand", "CANARY-7"}, &out); err != nil {
+		t.Fatal(err)
+	}
+	if label, err := st.PriceListID(ctx, "stand"); err != nil || label == nil || *label != "CANARY-7" {
+		t.Fatalf("label = %v %v, want CANARY-7", label, err)
+	}
+	if err := run(ctx, []string{"price-list-id", "set", "--tenant", "nobody", "X"}, &out); err == nil {
+		t.Error("an unknown tenant must be refused")
+	}
+	if err := run(ctx, []string{"price-list-id", "set", "--tenant", "stand"}, &out); err == nil {
+		t.Error("a call without a label must be refused")
+	}
+}

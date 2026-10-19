@@ -58,11 +58,15 @@ func SKUs(lines []document.Line) []string {
 // the business key (ref is the raw BEG03). Anything that does not fit gives a
 // *DenyError: a SKU that is not in the price list or is a note reference
 // (unknown_sku), a missing or non-positive quantity (invalid_quantity), no lines
-// (no_lines), lines in more than one currency (mixed_currency).
+// (no_lines), lines in more than one currency (mixed_currency). An empty delivery
+// instruction is "none".
 func BuildOrder(h document.Header850, lines []document.Line, partnerID, ref, delivery string, prices map[string]store.Price) (OrderPayload, error) {
 	explain := map[string]bool{}
 	if len(lines) == 0 {
 		explain["no_lines"] = true
+	}
+	if delivery == "" {
+		delivery = "none" // an absent optional value is the default value: same request hash, same order
 	}
 	out := OrderPayload{PartnerID: partnerID, BusinessRef: ref, DeliveryInstruction: delivery, Lines: []OrderLine{}}
 	if h.ShipTo != nil && !isNoteRef(*h.ShipTo) {

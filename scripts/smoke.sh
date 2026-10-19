@@ -249,8 +249,8 @@ echo "$again_order" >>"$AGENT_OUT"
 [ "$again_order" = "$ordered" ] || fail "r: the answer differs: $ordered / $again_order"
 n=$(sql "SELECT count(*) FROM idempotency_keys WHERE tenant_id = 'smoke'")
 [ "$n" = 1 ] || fail "r: expected one key, got $n"
-n=$(sql "SELECT count(*) FROM outbox WHERE tenant_id = 'smoke'")
-[ "$n" = 1 ] || fail "r: expected one outbox row, got $n"
+n=$(sql "SELECT count(*) FROM outbox WHERE tenant_id = 'smoke' AND effect_type <> 'edi.send_997'")
+[ "$n" = 1 ] || fail "r: expected one outbox row of an effect, got $n"
 echo "ok: r same txn_id, one key, one outbox row"
 
 # (s) a few seconds later the relay has delivered it: txn.status is completed with an external
@@ -506,6 +506,9 @@ receive_order 17 "$S2_REF"
 order_of
 ans=$(call_agent erp.confirm_order "{\"sales_order_txn_id\":\"$S2_TXN\",\"ack_type\":\"AC\"}") || fail "s2: erp.confirm_order failed: $ans"
 approve_if_pending "$ans"
+wait_sql "s2: the 997 for the 850 is delivered with an MDN" "SELECT (count(*) >= 1)::text FROM outbound_docs WHERE tenant_id = 'smoke' AND st01 = '997' AND state = 'delivered' AND mdn_ok" true
+n=$(sql "SELECT count(*) FROM mock_partner.received WHERE tenant_id = '$GATEWAY' AND st01 = '997' AND position('AK5*A~' in convert_from(body, 'UTF8')) > 0")
+[ "$n" -ge 1 ] || fail "s2: the partner has no 997 with AK5 A for its 850"
 wait_sql "s2: the 855 is delivered" "$DOC_STATE = '$S2_REF' AND d.st01 = '855'" "delivered|true|A"
 wait_sql "s2: the order saga is done" "SELECT state FROM sagas WHERE tenant_id = 'smoke' AND kind = 'order' AND business_key->>1 = '$S2_REF'" done
 wait_status "$S2_TXN" completed

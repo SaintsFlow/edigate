@@ -42,8 +42,6 @@ def parse_args(argv):
     ap.add_argument("--slots", type=int, default=1, help=f"parallel slots, 1 to {MAX_SLOTS}")
     ap.add_argument("--out", help="output folder (default out/run-<time>)")
     ap.add_argument("--run-id", help="name of the run (default: the time)")
-    ap.add_argument("--invoices-with-currency", action="store_true",
-                    help="with stratified:N keep only benign 810 documents that have a CUR segment (the gateway refuses the rest)")
     ap.add_argument("--quarantine-model", default="llama3.2:3b", help="model of the quarantine reader of the gateway ('' switches it off)")
     args = ap.parse_args(argv)
     if not 1 <= args.slots <= MAX_SLOTS:
@@ -51,9 +49,9 @@ def parse_args(argv):
     return args
 
 
-def select_docs(corpus, spec, smoke_pick=False):
+def select_docs(corpus, spec):
     if spec.startswith("stratified:"):
-        return corpus.stratified(int(spec.split(":", 1)[1]), invoices_with_currency=smoke_pick)
+        return corpus.stratified(int(spec.split(":", 1)[1]))
     return corpus.select(spec)
 
 
@@ -147,7 +145,7 @@ def main(argv=None):
     run_id = args.run_id or time.strftime("%Y%m%d-%H%M%S")
     out_dir = Path(args.out or f"out/run-{run_id}")
     corpus = Corpus(args.corpus)
-    doc_ids = select_docs(corpus, args.docs, args.invoices_with_currency)
+    doc_ids = select_docs(corpus, args.docs)
     fault_ids = [f for f in args.faults.split(",") if f]
     config_ids, model_ids = [], []
     for c in args.configs.split(","):

@@ -56,7 +56,11 @@ func PostVendorInvoice(ctx context.Context, st *store.Store, dec Decider, c Call
 	if src.BKRef == "" {
 		return OrderResult{}, rpcerr.Denied([]string{"missing_business_key"})
 	}
-	payload, norm, err := txn.BuildInvoice(h, lines, src.PartnerID, src.BKRef)
+	currency, err := st.DefaultCurrency(ctx, c.TenantID, src.PartnerID)
+	if err != nil {
+		return OrderResult{}, err
+	}
+	payload, norm, err := txn.BuildInvoice(h, lines, src.PartnerID, src.BKRef, currency)
 	var deny *txn.DenyError
 	if errors.As(err, &deny) {
 		return OrderResult{}, rpcerr.Denied(deny.Explain)

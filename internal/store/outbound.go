@@ -5,8 +5,12 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
+
+	"github.com/SaintsFlow/edigate/internal/adapters"
+	"github.com/SaintsFlow/edigate/internal/edi/outbound"
 )
 
 // This file holds what happens to a document sent to a partner after its outbox row is
@@ -41,11 +45,11 @@ func (c *Claim) DocIncident(ctx context.Context, docID string) (string, error) {
 // the MDN is stored and the document becomes sent, or delivered if the 997 came first. An MDN
 // for a document that is already an incident changes nothing but the audit log.
 func (c *Claim) RecordTransmission(ctx context.Context, docID string, ok bool, mdn []byte) error {
-	var state, ack string
+	var state, ack, st01 string
 	var key []byte
 	err := c.tx.QueryRow(ctx,
-		`SELECT state, COALESCE(ack_status, ''), idem_key FROM outbound_docs WHERE id = $1::uuid FOR UPDATE`, docID).
-		Scan(&state, &ack, &key)
+		`SELECT state, COALESCE(ack_status, ''), idem_key, st01 FROM outbound_docs WHERE id = $1::uuid FOR UPDATE`, docID).
+		Scan(&state, &ack, &key, &st01)
 	if err != nil {
 		return err
 	}
@@ -57,6 +61,8 @@ func (c *Claim) RecordTransmission(ctx context.Context, docID string, ok bool, m
 	switch {
 	case state == "incident":
 		event = "mdn_after_incident"
+	case st01 == "997":
+		next = "delivered" // nobody acknowledges a 997: the MDN is all there is
 	case ack == "A" || ack == "E":
 		next, event = "delivered", ackEvent(ack)
 	default:
@@ -95,6 +101,33 @@ func ackEvent(code string) string {
 		return "ack_accepted_with_errors"
 	}
 	return "ack_delivered"
+}
+
+// queueReplies puts the 997 for each group of the interchange into the outbox, in the
+// transaction that stores the interchange (invariant I7: the numbers, the bytes and the
+// interchange are fixed together). A 997 whose content cannot be written is not sent; the
+// audit log says so and the interchange is stored all the same.
+func queueReplies(ctx context.Context, tx pgx.Tx, in InboundInterchange) error {
+	for _, a := range in.Replies {
+		probe := outbound.Envelope{Sender: in.GatewayID, Receiver: in.PartnerID, ISA13: "000000001", GS06: "1", ST02: "0001", Now: time.Now()}
+		if _, err := outbound.Build997(a, probe); err != nil {
+			detail, jerr := json.Marshal(map[string]string{"gs06": a.GroupControl})
+			if jerr != nil {
+				return jerr
+			}
+			if err := appendAudit(ctx, tx, AuditEvent{TenantID: in.TenantID, EventType: "ack_not_built", TraceID: "inbound",
+				PrincipalID: "gateway", Outcome: "skipped", Detail: detail}); err != nil {
+				return err
+			}
+			continue
+		}
+		err := queueDocument(ctx, tx, in.TenantID, in.GatewayID, in.PartnerID, nil, adapters.EffectSend997, "997",
+			func(env outbound.Envelope) ([]byte, error) { return outbound.Build997(a, env) })
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // InboundAck is a 997 to match: the group it answers (AK102) and the verdict on each of its sets.
