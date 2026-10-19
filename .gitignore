@@ -5,6 +5,7 @@ coverage.*
 .DS_Store
 __pycache__/
 .venv/
+bench/out/
 
 # working files of the author
 AGENTS.md

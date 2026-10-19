@@ -45,6 +45,9 @@ The quarantined reader is configured with `EDIGATE_QUARANTINE_BASE_URL` (any Ope
 `edigatectl parse <file>` checks an X12 file with the same strict parser and prints a JSON summary; the exit code is
 0 only when the envelope and every set are accepted.
 
+`make corpus` builds the EDI-Inject test corpus (300 X12 documents with labels) into `bench/out/corpus-seed1` and
+checks every document with the strict parser. Rules of the generator: [bench/edi_inject/README.md](bench/edi_inject/README.md).
+
 ## Documents
 
 [docs](docs) holds the threat model, the invariants and the SHA-256 of the research protocol that the experiments

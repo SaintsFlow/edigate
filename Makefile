@@ -1,7 +1,7 @@
 COMPOSE = docker compose -f deploy/compose/docker-compose.yml
 TEST_DB = postgres://edigate:edigate@127.0.0.1:55432/edigate?sslmode=disable
 
-.PHONY: build up down test fuzz smoke
+.PHONY: build up down test fuzz smoke corpus
 
 build:
 	go build -o bin/ ./cmd/...
@@ -27,3 +27,9 @@ fuzz:
 
 smoke: build up
 	sh scripts/smoke.sh
+
+# Builds the EDI-Inject v1 corpus (seed 1) into bench/out/corpus-seed1, then checks that the
+# strict parser takes every document as its label says. Without -I, because -m needs the cwd.
+corpus: build
+	cd bench && python3 -m edi_inject.generate --n 300 --seed 1 --out out/corpus-seed1
+	python3 -I bench/tests/check_parse.py bench/out/corpus-seed1 bin/edigatectl
