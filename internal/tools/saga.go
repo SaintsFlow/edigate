@@ -46,6 +46,18 @@ type OrderRefInput struct {
 // (compensating, compensated, incident, done) is policy_denied with saga.order.
 func order(ctx context.Context, st *store.Store, tenantID, txnID string) (store.OrderSaga, sagaOrder, error) {
 	o, err := st.OrderSagaByTxn(ctx, tenantID, txnID, CreateOrderTool)
+	return runningOrder(o, err)
+}
+
+// orderByRef is order for the tools that take their values from the model and name the order
+// by its partner (may be empty) and business reference.
+func orderByRef(ctx context.Context, st *store.Store, tenantID, partnerID, ref string) (store.OrderSaga, sagaOrder, error) {
+	o, err := st.OrderSagaByRef(ctx, tenantID, partnerID, ref)
+	return runningOrder(o, err)
+}
+
+// runningOrder turns the lookup of an order saga into the saga and the order it keeps.
+func runningOrder(o store.OrderSaga, err error) (store.OrderSaga, sagaOrder, error) {
 	if errors.Is(err, store.ErrNotFound) {
 		return store.OrderSaga{}, sagaOrder{}, rpcerr.New(rpcerr.NotFound, "")
 	}
@@ -125,7 +137,16 @@ func WMSReserve(ctx context.Context, st *store.Store, dec Decider, c Caller, in 
 	if err != nil {
 		return OrderResult{}, err
 	}
-	bk, reqHash, err := keysOf(o, payload)
+	return reserveOrder(ctx, st, dec, c, o, kept, payload)
+}
+
+// reserveOrder queues the reservation of the order with this request to the warehouse.
+func reserveOrder(ctx context.Context, st *store.Store, dec Decider, c Caller, o store.OrderSaga, kept sagaOrder, payload []byte) (OrderResult, error) {
+	reqHash, err := txn.ReqHash(json.RawMessage(payload))
+	if err != nil {
+		return OrderResult{}, err
+	}
+	key, bk, err := stepKeys(c, WMSReserveTool, o)
 	if err != nil {
 		return OrderResult{}, err
 	}
@@ -134,7 +155,7 @@ func WMSReserve(ctx context.Context, st *store.Store, dec Decider, c Caller, in 
 	return reserveEffect(ctx, st, dec, c, effectRequest{
 		Tool: WMSReserveTool, EffectType: adapters.EffectWMSReserve, Src: sourceOf(o), ST01: "850",
 		Effect: json.RawMessage(payload), AmountCents: amount, ViewArgs: view,
-		Key: txn.Key(c.TenantID, WMSReserveTool, o.PartnerID, o.Ref), BusinessKey: bk, ReqHash: reqHash, Payload: payload,
+		Key: key, BusinessKey: bk, ReqHash: reqHash, Payload: payload,
 		Saga: &store.SagaLink{
 			Kind: "shipment", StepNo: 1, Steps: []string{adapters.EffectWMSReserve, adapters.EffectWMSShip, adapters.EffectSend856},
 			Payload: o.Payload, SourceDocumentID: o.SourceDocumentID,
@@ -155,7 +176,17 @@ func SendASN(ctx context.Context, st *store.Store, dec Decider, c Caller, in Ord
 	if err != nil {
 		return OrderResult{}, err
 	}
-	bk, reqHash, err := keysOf(o, payload)
+	return shipOrder(ctx, st, dec, c, o, kept, payload, json.RawMessage(payload))
+}
+
+// shipOrder queues the shipment of the order with this request to the warehouse. effect is
+// what the policy sees of the call (the request, and in the open mode the ship-to as well).
+func shipOrder(ctx context.Context, st *store.Store, dec Decider, c Caller, o store.OrderSaga, kept sagaOrder, payload []byte, effect any) (OrderResult, error) {
+	reqHash, err := txn.ReqHash(json.RawMessage(payload))
+	if err != nil {
+		return OrderResult{}, err
+	}
+	key, bk, err := stepKeys(c, SendASNTool, o)
 	if err != nil {
 		return OrderResult{}, err
 	}
@@ -171,8 +202,8 @@ func SendASN(ctx context.Context, st *store.Store, dec Decider, c Caller, in Ord
 	view := map[string]any{"partner_id": o.PartnerID, "lines": kept.Lines, "total": kept.Total, "currency": kept.Currency}
 	return reserveEffect(ctx, st, dec, c, effectRequest{
 		Tool: SendASNTool, EffectType: adapters.EffectWMSShip, Src: sourceOf(o), ST01: "850",
-		Effect: json.RawMessage(payload), AmountCents: amount, ForecastCents: &forecast, ViewArgs: view,
-		Key: txn.Key(c.TenantID, SendASNTool, o.PartnerID, o.Ref), BusinessKey: bk, ReqHash: reqHash, Payload: payload,
+		Effect: effect, AmountCents: amount, ForecastCents: &forecast, ViewArgs: view,
+		Key: key, BusinessKey: bk, ReqHash: reqHash, Payload: payload,
 		Saga: &store.SagaLink{Kind: "shipment", StepNo: 2},
 	})
 }
@@ -189,8 +220,8 @@ func SendShipNotice(ctx context.Context, st *store.Store, dec Decider, sg store.
 	}
 	var partner, ref string
 	var bk []string
-	if err := json.Unmarshal(sg.BusinessKey, &bk); err != nil || len(bk) != 2 {
-		return OrderResult{}, errors.New("the business key of the saga is not [partner, reference]")
+	if err := json.Unmarshal(sg.BusinessKey, &bk); err != nil || len(bk) < 2 {
+		return OrderResult{}, errors.New("the business key of the saga is not [partner, reference, ...]")
 	}
 	partner, ref = bk[0], bk[1]
 	prices := map[string]txn.OrderLine{}
@@ -212,7 +243,7 @@ func SendShipNotice(ctx context.Context, st *store.Store, dec Decider, sg store.
 		spec.Lines = append(spec.Lines, outbound.Line{SKU: l.SKU, Qty: l.Qty, Unit: l.Unit, UnitPrice: priced.UnitPrice, SSCC: facts.SSCC[i]})
 	}
 	c := Caller{TenantID: sg.TenantID, PrincipalID: "saga", Kind: "saga", TraceID: "saga"}
-	o := store.OrderSaga{PartnerID: partner, Ref: ref, SourceDocumentID: sg.SourceDocumentID, Payload: sg.Payload}
+	o := store.OrderSaga{PartnerID: partner, Ref: ref, SourceDocumentID: sg.SourceDocumentID, Payload: sg.Payload, BusinessKey: sg.BusinessKey}
 	return sendDocument(ctx, st, dec, c, o, kept, spec, effectKeys{
 		tool: sendShipNotice, policyTool: SendASNTool, effect: adapters.EffectSend856, kind: "shipment", step: 3,
 	})
@@ -240,7 +271,7 @@ func sendDocument(ctx context.Context, st *store.Store, dec Decider, c Caller, o
 	if err != nil {
 		return OrderResult{}, err
 	}
-	bk, err := txn.BusinessKeyJSON(o.PartnerID, o.Ref)
+	key, bk, err := stepKeys(c, k.tool, o)
 	if err != nil {
 		return OrderResult{}, err
 	}
@@ -251,7 +282,7 @@ func sendDocument(ctx context.Context, st *store.Store, dec Decider, c Caller, o
 	return reserveEffect(ctx, st, dec, c, effectRequest{
 		Tool: k.tool, PolicyTool: k.policyTool, EffectType: k.effect, Src: sourceOf(o), ST01: "850",
 		Effect: spec, AmountCents: amount, ForecastCents: &forecast, ViewArgs: viewOfSpec(spec, amount, forecast),
-		Key: txn.Key(c.TenantID, k.tool, o.PartnerID, o.Ref), BusinessKey: bk, ReqHash: reqHash, Payload: payload,
+		Key: key, BusinessKey: bk, ReqHash: reqHash, Payload: payload,
 		Saga: &store.SagaLink{Kind: k.kind, StepNo: k.step},
 	})
 }
@@ -263,14 +294,6 @@ func warehouseRequest(o store.OrderSaga, kept sagaOrder) map[string]any {
 		lines = append(lines, map[string]string{"sku": l.SKU, "qty": l.Qty, "unit": l.Unit})
 	}
 	return map[string]any{"order_ref": o.Ref, "lines": lines}
-}
-
-func keysOf(o store.OrderSaga, payload []byte) (businessKey, reqHash []byte, err error) {
-	if businessKey, err = txn.BusinessKeyJSON(o.PartnerID, o.Ref); err != nil {
-		return nil, nil, err
-	}
-	reqHash, err = txn.ReqHash(json.RawMessage(payload))
-	return businessKey, reqHash, err
 }
 
 // sourceOf is the 850 an order came from, as the reservation of a key wants it.

@@ -49,6 +49,7 @@ type rig struct {
 	mockURL string // mock-1c
 	relay   *txn.Relay
 	rec     *recorder // sits in front of the policy and keeps what it was asked
+	srv     atomic.Pointer[mcp.Server]
 	seq     atomic.Int64
 }
 
@@ -90,8 +91,9 @@ func newRig(t *testing.T) *rig {
 	engine, err := policy.New(ctx)
 	r.must(err)
 	r.rec = &recorder{inner: engine}
-	srv := mcpserver.New(st, nil, r.rec, log)
-	sdk := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return srv },
+	r.srv.Store(mcpserver.New(st, nil, r.rec, log))
+	// A test of a mode swaps the server (see sagaRig.play); the listener stays.
+	sdk := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return r.srv.Load() },
 		&mcp.StreamableHTTPOptions{Stateless: true, JSONResponse: true})
 	mux := http.NewServeMux()
 	mux.Handle("/mcp", gate.MCP(sdk))

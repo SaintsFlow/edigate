@@ -344,7 +344,9 @@ func TestT_QUAR_02_HangingModelGivesQuarantineInvalid(t *testing.T) {
 	}
 }
 
-func TestExtractNoteBucketIsTwoPerSecond(t *testing.T) {
+// T-RATE-01: the third edi.extract_note of a principal in a second is rate_limited, while the
+// general bucket of the principal (20 per second) still has room.
+func TestT_RATE_01_ExtractNoteBucketIsTwoPerSecond(t *testing.T) {
 	r := newRig(t)
 	me, tok := r.fresh("ta", "customer")
 	wantStatus(t, r.post(tok, me, gatewayID, "<rl>", exchange(t, "850_full.edi", me, "000001061")), 200)

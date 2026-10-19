@@ -39,6 +39,23 @@ func TestLoad(t *testing.T) {
 	}
 }
 
+func TestLoadSlotSettings(t *testing.T) {
+	t.Setenv("EDIGATE_DB_URL", "postgres://example/db")
+	t.Setenv("EDIGATE_LISTEN", "")
+	t.Setenv("EDIGATE_PUBLIC_URL", "http://host.docker.internal:18190")
+	t.Setenv("EDIGATE_TRANSPORT_LOG", "/tmp/transport.jsonl")
+	c, err := Load("")
+	if err != nil || c.PublicURL != "http://host.docker.internal:18190" || c.TransportLog != "/tmp/transport.jsonl" {
+		t.Fatalf("slot settings: %+v %v", c, err)
+	}
+	for _, bad := range []string{"host:18190", "ftp://host", "http://"} {
+		t.Setenv("EDIGATE_PUBLIC_URL", bad)
+		if _, err := Load(""); err == nil {
+			t.Errorf("EDIGATE_PUBLIC_URL %q must fail", bad)
+		}
+	}
+}
+
 func TestLoadQuarantine(t *testing.T) {
 	t.Setenv("EDIGATE_DB_URL", "postgres://example/db")
 	t.Setenv("EDIGATE_LISTEN", "")

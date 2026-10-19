@@ -19,6 +19,12 @@ type Mail struct{ service }
 // NewMail builds the client for the service at baseURL.
 func NewMail(baseURL string) *Mail { return &Mail{newService(baseURL, mailTimeout, mailRoutes)} }
 
+// WithReplyTo makes the client send the stand header Edigate-Reply-To (see ReplyToHeader).
+func (m *Mail) WithReplyTo(publicURL string) *Mail {
+	m.replyTo = publicURL
+	return m
+}
+
 // Apply posts the letter. The service takes a repeat with the same external id once.
 func (m *Mail) Apply(ctx context.Context, e Effect) (string, error) { return m.apply(ctx, e) }
 

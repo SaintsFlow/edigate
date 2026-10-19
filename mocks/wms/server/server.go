@@ -26,6 +26,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"math/big"
 	"math/rand/v2"
 	"net/http"
@@ -45,7 +46,7 @@ CREATE SCHEMA IF NOT EXISTS mock_wms;
 CREATE TABLE IF NOT EXISTS mock_wms.reservations (
     id          bigserial PRIMARY KEY,
     tenant_id   text NOT NULL,
-    external_id text NOT NULL UNIQUE,
+    external_id text NULL UNIQUE,
     order_ref   text NOT NULL,
     lines       jsonb NOT NULL,
     status      text NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'released')),
@@ -54,12 +55,14 @@ CREATE TABLE IF NOT EXISTS mock_wms.reservations (
 CREATE TABLE IF NOT EXISTS mock_wms.shipments (
     id          bigserial PRIMARY KEY,
     tenant_id   text NOT NULL,
-    external_id text NOT NULL UNIQUE,
+    external_id text NULL UNIQUE,
     order_ref   text NOT NULL,
     lines       jsonb NOT NULL,
     sscc        text[] NOT NULL,
     created_at  timestamptz NOT NULL DEFAULT now()
-);`
+);
+ALTER TABLE mock_wms.reservations ALTER COLUMN external_id DROP NOT NULL;
+ALTER TABLE mock_wms.shipments ALTER COLUMN external_id DROP NOT NULL;`
 
 // Migrate creates the schema and the tables of the mock if they are missing.
 func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
@@ -130,7 +133,8 @@ type line struct {
 	Unit string `json:"unit"`
 }
 
-// request is the body of POST /reservations and POST /shipments.
+// request is the body of POST /reservations and POST /shipments. An empty external_id is a
+// request without a key (a client like the baseline C0 sends none): it always makes a new row.
 type request struct {
 	TenantID   string `json:"tenant_id"`
 	ExternalID string `json:"external_id"`
@@ -141,7 +145,7 @@ type request struct {
 var reQty = regexp.MustCompile(`^[0-9]{1,12}(\.[0-9]{1,3})?$`)
 
 func (q request) valid() bool {
-	if q.TenantID == "" || q.ExternalID == "" || q.OrderRef == "" || len(q.Lines) == 0 {
+	if q.TenantID == "" || q.OrderRef == "" || len(q.Lines) == 0 {
 		return false
 	}
 	for _, l := range q.Lines {
@@ -180,9 +184,9 @@ func (s *Server) reserve(w http.ResponseWriter, r *http.Request) {
 	var id int64
 	err := s.pool.QueryRow(r.Context(),
 		`INSERT INTO mock_wms.reservations (tenant_id, external_id, order_ref, lines)
-		 VALUES ($1, $2, $3, $4) ON CONFLICT (external_id) DO NOTHING RETURNING id`,
+		 VALUES ($1, NULLIF($2, ''), $3, $4) ON CONFLICT (external_id) DO NOTHING RETURNING id`,
 		in.TenantID, in.ExternalID, in.OrderRef, lines).Scan(&id)
-	s.answer(w, r, cfg, err, id, in.ExternalID, "mock_wms.reservations")
+	s.answer(w, r, cfg, err, id, in.ExternalID, "mock_wms.reservations", nil)
 }
 
 func (s *Server) ship(w http.ResponseWriter, r *http.Request) {
@@ -195,6 +199,12 @@ func (s *Server) ship(w http.ResponseWriter, r *http.Request) {
 		reply(w, http.StatusUnprocessableEntity, map[string]string{"error": "shipment refused"})
 		return
 	}
+	// The labels come from the external id, so that the same shipment has the same labels. A
+	// shipment without an external id takes a random seed.
+	seed := in.ExternalID
+	if seed == "" {
+		seed = fmt.Sprintf("%x", sha256.Sum256([]byte(fmt.Sprint(time.Now().UnixNano(), rand.Uint64()))))
+	}
 	shipped := make([]line, len(in.Lines))
 	labels := make([]string, len(in.Lines))
 	for i, l := range in.Lines {
@@ -204,27 +214,33 @@ func (s *Server) ship(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		shipped[i] = line{SKU: l.SKU, Qty: qty, Unit: l.Unit}
-		labels[i] = SSCC(in.ExternalID, i)
+		labels[i] = SSCC(seed, i)
 	}
 	lines, _ := json.Marshal(shipped)
 	var id int64
 	err := s.pool.QueryRow(r.Context(),
 		`INSERT INTO mock_wms.shipments (tenant_id, external_id, order_ref, lines, sscc)
-		 VALUES ($1, $2, $3, $4, $5) ON CONFLICT (external_id) DO NOTHING RETURNING id`,
+		 VALUES ($1, NULLIF($2, ''), $3, $4, $5) ON CONFLICT (external_id) DO NOTHING RETURNING id`,
 		in.TenantID, in.ExternalID, in.OrderRef, lines, labels).Scan(&id)
-	s.answer(w, r, cfg, err, id, in.ExternalID, "mock_wms.shipments")
+	s.answer(w, r, cfg, err, id, in.ExternalID, "mock_wms.shipments", map[string]any{"lines": shipped, "sscc": labels})
 }
 
 // answer finishes a create: a new row is 201 (or a lost answer, by the knob), a row that was
-// there is 200 with the stored one.
-func (s *Server) answer(w http.ResponseWriter, r *http.Request, cfg Config, err error, id int64, ext, table string) {
+// there is 200 with the stored one. facts are added to the answer of a new row (what a
+// shipment recorded), so that a client without a key can read the labels it got.
+func (s *Server) answer(w http.ResponseWriter, r *http.Request, cfg Config, err error, id int64, ext, table string, facts map[string]any) {
 	switch {
 	case err == nil:
 		if rand.Float64() < cfg.FailAfterCommitRate {
 			reply(w, http.StatusInternalServerError, map[string]string{"error": "lost the answer"}) // committed, answer lost
 			return
 		}
-		reply(w, http.StatusCreated, map[string]any{"id": id, "external_id": ext})
+		body := map[string]any{"id": id, "external_id": nil}
+		if ext != "" {
+			body["external_id"] = ext
+		}
+		maps.Copy(body, facts)
+		reply(w, http.StatusCreated, body)
 	case errors.Is(err, pgx.ErrNoRows):
 		var stored int64
 		if err := s.pool.QueryRow(r.Context(), `SELECT id FROM `+table+` WHERE external_id = $1`, ext).Scan(&stored); err != nil {

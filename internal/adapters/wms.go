@@ -3,6 +3,7 @@ package adapters
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/url"
 	"time"
@@ -51,6 +52,21 @@ type Shipment struct {
 	OrderRef   string     `json:"order_ref"`
 	Lines      []ShipLine `json:"lines"`
 	SSCC       []string   `json:"sscc"`
+}
+
+// ShipNow ships without an external id and returns what the warehouse recorded, with the SSCC
+// of every line (the answer of POST /shipments carries them). The open tools use it: they
+// have no key, so there is nothing to look the shipment up by afterwards.
+func (w *WMS) ShipNow(ctx context.Context, tenantID string, payload json.RawMessage) (Shipment, error) {
+	reply, err := w.post(ctx, Effect{Type: EffectWMSShip, TenantID: tenantID, Payload: payload})
+	if err != nil {
+		return Shipment{}, err
+	}
+	var s Shipment
+	if err := json.Unmarshal(reply, &s); err != nil || len(s.Lines) == 0 || len(s.Lines) != len(s.SSCC) {
+		return Shipment{}, errors.New("the warehouse answer holds no shipped lines")
+	}
+	return s, nil
 }
 
 // Shipment reads the shipment with this external id (the key of the step wms.ship in hex).

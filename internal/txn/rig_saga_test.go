@@ -34,6 +34,8 @@ type sagaRig struct {
 	wms        *wmsserver.Server
 	partner    *partnerserver.Server
 	partnerURL string
+	wmsURL     string
+	tokensFile string // the tokens file of the partner emulator
 	runner     *saga.Runner
 	partnerID  string
 	ptoken     string
@@ -41,44 +43,80 @@ type sagaRig struct {
 	op1, op2   string // tokens of two operators
 }
 
-func newSagaRig(t *testing.T) *sagaRig {
+func newSagaRig(t *testing.T) *sagaRig { return newSagaRigWith(t, nil) }
+
+// newSagaRigWith builds a gateway on a database of its own. With shared set it does not start
+// mock-1c, mock-wms and the partner emulator but uses those of the other rig: this is a second
+// slot of the benchmark. Its public address is written to the tokens file of the emulator, and
+// its documents carry the header Edigate-Reply-To, so that the 997 comes back to it.
+func newSagaRigWith(t *testing.T, shared *sagaRig) *sagaRig {
 	t.Helper()
 	r := newRig(t)
 	ctx := context.Background()
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	r.must(wmsserver.Migrate(ctx, r.pool))
-	wms := wmsserver.New(r.pool, wmsserver.Config{})
-	wmsTS := httptest.NewServer(wms.Handler())
-	t.Cleanup(wmsTS.Close)
-
-	r.must(partnerserver.Migrate(ctx, r.pool))
+	s := &sagaRig{rig: r}
 	partnerID, ptoken := r.partner("ta")
-	tokens := filepath.Join(t.TempDir(), "partner_tokens.json")
-	raw, err := json.Marshal(map[string]string{partnerID: ptoken})
-	r.must(err)
-	r.must(os.WriteFile(tokens, raw, 0o600))
-	partner := partnerserver.New(r.pool, partnerserver.Config{
-		Knobs: partnerserver.Knobs{AckStatus: "A"}, GatewayURL: r.url, TokensFile: tokens, Log: log,
-	})
-	partnerTS := httptest.NewServer(partner.Handler())
-	t.Cleanup(func() { partnerTS.Close(); partner.Close() })
+	s.partnerID, s.ptoken = partnerID, ptoken
+	if shared == nil {
+		r.must(wmsserver.Migrate(ctx, r.pool))
+		s.wms = wmsserver.New(r.pool, wmsserver.Config{})
+		wmsTS := httptest.NewServer(s.wms.Handler())
+		t.Cleanup(wmsTS.Close)
+		s.wmsURL = wmsTS.URL
 
-	effects := adapters.Mux{Onec: adapters.NewOnec(r.mockURL), WMS: adapters.NewWMS(wmsTS.URL), Mail: adapters.NewMail(partnerTS.URL)}
+		r.must(partnerserver.Migrate(ctx, r.pool))
+		s.tokensFile = filepath.Join(t.TempDir(), "partner_tokens.json")
+		raw, err := json.Marshal(map[string]string{partnerID: ptoken})
+		r.must(err)
+		r.must(os.WriteFile(s.tokensFile, raw, 0o600))
+		s.partner = partnerserver.New(r.pool, partnerserver.Config{
+			Knobs: partnerserver.Knobs{AckStatus: "A"}, GatewayURL: r.url, TokensFile: s.tokensFile, Log: log,
+		})
+		partnerTS := httptest.NewServer(s.partner.Handler())
+		t.Cleanup(func() { partnerTS.Close(); s.partner.Close() })
+		s.partnerURL = partnerTS.URL
+	} else {
+		s.wms, s.partner, s.wmsURL, s.partnerURL, s.tokensFile = shared.wms, shared.partner, shared.wmsURL, shared.partnerURL, shared.tokensFile
+		r.mockURL = shared.mockURL
+		r.must(addPartnerToken(s.tokensFile, r.url+" "+partnerID, ptoken))
+	}
+
+	mail, as2 := adapters.NewMail(s.partnerURL), adapters.NewAS2(s.partnerURL)
+	if shared != nil {
+		mail, as2 = mail.WithReplyTo(r.url), as2.WithReplyTo(r.url)
+	}
+	effects := adapters.Mux{Onec: adapters.NewOnec(r.mockURL), WMS: adapters.NewWMS(s.wmsURL), Mail: mail}
 	r.relay.Adapter = effects
-	r.relay.AS2 = adapters.NewAS2(partnerTS.URL)
+	r.relay.AS2 = as2
 	r.relay.MDNRepeatAfter = 30 * time.Millisecond
-	runner := &saga.Runner{
-		Store: r.st, Adapter: effects, Facts: adapters.NewWMS(wmsTS.URL), Policy: r.rec,
+	s.runner = &saga.Runner{
+		Store: r.st, Adapter: effects, Facts: adapters.NewWMS(s.wmsURL), Policy: r.rec,
 		Scale: 1e6, AckTimeout: time.Hour, Log: log,
 	}
 	_, atoken := r.token("ta", "agent", "")
-	_, op1 := r.token("ta", "operator", "")
-	_, op2 := r.token("ta", "operator", "")
-	return &sagaRig{
-		rig: r, wms: wms, partner: partner, partnerURL: partnerTS.URL, runner: runner,
-		partnerID: partnerID, ptoken: ptoken, agent: r.session(atoken), op1: op1, op2: op2,
+	_, s.op1 = r.token("ta", "operator", "")
+	_, s.op2 = r.token("ta", "operator", "")
+	s.agent = r.session(atoken)
+	return s
+}
+
+// addPartnerToken adds one entry to the tokens file of the emulator and keeps the others.
+func addPartnerToken(path, key, token string) error {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return err
 	}
+	tokens := map[string]string{}
+	if err := json.Unmarshal(raw, &tokens); err != nil {
+		return err
+	}
+	tokens[key] = token
+	raw, err = json.Marshal(tokens)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, raw, 0o600)
 }
 
 // knobs sets the knobs of the partner (the JSON of POST /control).

@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "st01", "status", "header", "lines", "texts", "notes"],
+  "properties": {
+    "id": { "type": "string" },
+    "st01": { "enum": ["850", "810"] },
+    "status": { "enum": ["received", "processed"] },
+    "header": { "type": "object" },
+    "lines": { "type": "array", "items": { "type": "object" } },
+    "texts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["segment_path", "text"],
+        "properties": {
+          "segment_path": { "type": "string" },
+          "text": { "type": "string" }
+        }
+      }
+    },
+    "notes": { "type": "array", "maxItems": 0 }
+  }
+}

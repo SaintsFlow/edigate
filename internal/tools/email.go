@@ -62,7 +62,7 @@ func SendEmail(ctx context.Context, st *store.Store, dec Decider, c Caller, in S
 		return OrderResult{}, err
 	}
 	// The business key is (partner, BEG03, template); BEG03 has no NUL, so the join is exact.
-	businessKey, err := json.Marshal([]string{src.PartnerID, src.BKRef, in.TemplateID})
+	key, businessKey, err := requestKeys(c, SendEmailTool, src.PartnerID, src.BKRef+"\x00"+in.TemplateID, src.PartnerID, src.BKRef, in.TemplateID)
 	if err != nil {
 		return OrderResult{}, err
 	}
@@ -70,7 +70,7 @@ func SendEmail(ctx context.Context, st *store.Store, dec Decider, c Caller, in S
 	return reserveEffect(ctx, st, dec, c, effectRequest{
 		Tool: SendEmailTool, EffectType: adapters.EffectEmail, Src: src, ST01: "850",
 		Effect: payload, ViewArgs: view,
-		Key:         txn.Key(c.TenantID, SendEmailTool, src.PartnerID, src.BKRef+"\x00"+in.TemplateID),
+		Key:         key,
 		BusinessKey: businessKey, ReqHash: reqHash, Payload: raw,
 	})
 }

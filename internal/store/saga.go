@@ -190,6 +190,27 @@ type OrderSaga struct {
 	Payload          []byte // JSON: the order as the gateway built it
 	SourceDocumentID string
 	OrderKeyState    string // the state of the key of erp.create_sales_order
+	BusinessKey      []byte // JSON: [partner, reference], and in the mode no-bizkey a third part that tells orders apart
+}
+
+// OrderSagaByRef finds the newest order saga of a business reference of the tenant, for the
+// tools that take their values from the model and name the order by its number. An empty
+// partnerID matches any partner. Unknown gives ErrNotFound.
+func (s *Store) OrderSagaByRef(ctx context.Context, tenantID, partnerID, ref string) (OrderSaga, error) {
+	var o OrderSaga
+	err := s.pool.QueryRow(ctx,
+		`SELECT sg.id::text, sg.state, sg.business_key->>0, sg.business_key->>1, sg.payload, sg.source_document_id::text,
+		        COALESCE(k.state, ''), sg.business_key
+		 FROM sagas sg
+		 LEFT JOIN saga_steps st ON st.saga_id = sg.id AND st.step_no = 1
+		 LEFT JOIN idempotency_keys k ON k.key = st.idem_key
+		 WHERE sg.tenant_id = $1 AND sg.kind = 'order' AND sg.business_key->>1 = $3 AND ($2 = '' OR sg.business_key->>0 = $2)
+		 ORDER BY sg.created_at DESC LIMIT 1`, tenantID, partnerID, ref).
+		Scan(&o.SagaID, &o.State, &o.PartnerID, &o.Ref, &o.Payload, &o.SourceDocumentID, &o.OrderKeyState, &o.BusinessKey)
+	if isNoRows(err) {
+		return OrderSaga{}, ErrNotFound
+	}
+	return o, err
 }
 
 // OrderSagaByTxn finds the order saga of the txn_id that erp.create_sales_order gave. A txn_id of
@@ -197,11 +218,12 @@ type OrderSaga struct {
 func (s *Store) OrderSagaByTxn(ctx context.Context, tenantID, txnID, createTool string) (OrderSaga, error) {
 	var o OrderSaga
 	err := s.pool.QueryRow(ctx,
-		`SELECT sg.id::text, sg.state, sg.business_key->>0, sg.business_key->>1, sg.payload, sg.source_document_id::text, k.state
+		`SELECT sg.id::text, sg.state, sg.business_key->>0, sg.business_key->>1, sg.payload, sg.source_document_id::text, k.state,
+		        sg.business_key
 		 FROM idempotency_keys k
 		 JOIN sagas sg ON sg.tenant_id = k.tenant_id AND sg.kind = 'order' AND sg.business_key = k.business_key
 		 WHERE k.tenant_id = $1 AND k.txn_id = $2::uuid AND k.tool = $3`, tenantID, txnID, createTool).
-		Scan(&o.SagaID, &o.State, &o.PartnerID, &o.Ref, &o.Payload, &o.SourceDocumentID, &o.OrderKeyState)
+		Scan(&o.SagaID, &o.State, &o.PartnerID, &o.Ref, &o.Payload, &o.SourceDocumentID, &o.OrderKeyState, &o.BusinessKey)
 	if isNoRows(err) {
 		return OrderSaga{}, ErrNotFound
 	}

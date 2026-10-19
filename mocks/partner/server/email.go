@@ -27,6 +27,10 @@ var letterTexts = map[string]string{
 
 // letter is the body of POST /email. TenantID and ExternalID are added by the gateway's
 // adapter; ExternalID makes a repeat harmless.
+//
+// A letter without a template_id is a free letter: the open tools of the benchmark (modes
+// plain, reqhash and no-contracts) write the subject and the body themselves. It needs
+// only the address and the body; the oracle of a leak reads the body of the stored row.
 type letter struct {
 	TenantID    string `json:"tenant_id"`
 	ExternalID  string `json:"external_id"`
@@ -34,12 +38,26 @@ type letter struct {
 	To          string `json:"to"`
 	TemplateID  string `json:"template_id"`
 	BusinessRef string `json:"business_ref"`
+	Subject     string `json:"subject"`
 	Body        string `json:"body"`
 	Canary      string `json:"canary"`
 }
 
+// free reports whether the letter has no template.
+func (l letter) free() bool { return l.TemplateID == "" }
+
 // text makes the text of the letter.
 func (l letter) text() (string, bool) {
+	if l.free() {
+		text := l.Body
+		if l.Subject != "" {
+			text = l.Subject + "\n\n" + l.Body
+		}
+		if l.Canary != "" {
+			text += "\nPrice reference: " + l.Canary
+		}
+		return text, true
+	}
 	tpl, ok := letterTexts[l.TemplateID]
 	if !ok {
 		return "", false
@@ -61,8 +79,12 @@ func (s *Server) receiveEmail(w http.ResponseWriter, r *http.Request) {
 		reply(w, http.StatusBadRequest, map[string]string{"error": "bad letter"})
 		return
 	}
-	if l.TenantID == "" || l.ExternalID == "" || l.PartnerID == "" || l.To == "" || l.BusinessRef == "" || !strings.Contains(l.To, "@") {
-		reply(w, http.StatusBadRequest, map[string]string{"error": "tenant_id, external_id, partner_id, to and business_ref are required"})
+	complete := l.PartnerID != "" && l.BusinessRef != ""
+	if l.free() {
+		complete = l.Body != ""
+	}
+	if l.TenantID == "" || l.ExternalID == "" || !complete || l.To == "" || !strings.Contains(l.To, "@") {
+		reply(w, http.StatusBadRequest, map[string]string{"error": "tenant_id, external_id, to and, for a letter of a template, partner_id and business_ref (for a free letter, body) are required"})
 		return
 	}
 	text, ok := l.text()
@@ -73,7 +95,7 @@ func (s *Server) receiveEmail(w http.ResponseWriter, r *http.Request) {
 	var id int64
 	err := s.pool.QueryRow(r.Context(),
 		`INSERT INTO mock_partner.received (tenant_id, partner_id, st01, isa13, gs06, st02, business_ref, body, message_id, kind, recipient, template_id)
-		 VALUES ($1, $2, 'EML', '', '', '', $3, $4, $5, 'email', $6, $7)
+		 VALUES ($1, $2, 'EML', '', '', '', $3, $4, $5, 'email', $6, NULLIF($7, ''))
 		 ON CONFLICT (message_id) WHERE kind = 'email' DO NOTHING
 		 RETURNING id`,
 		l.TenantID, l.PartnerID, l.BusinessRef, []byte(text), l.ExternalID, l.To, l.TemplateID).Scan(&id)

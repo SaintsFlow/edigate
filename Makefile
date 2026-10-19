@@ -1,7 +1,7 @@
 COMPOSE = docker compose -f deploy/compose/docker-compose.yml
 TEST_DB = postgres://edigate:edigate@127.0.0.1:55432/edigate?sslmode=disable
 
-.PHONY: build up down test policy-test fuzz smoke chaos-dup corpus
+.PHONY: build up down test policy-test fuzz smoke slots chaos-dup corpus
 
 build:
 	go build -o bin/ ./cmd/...
@@ -31,6 +31,12 @@ fuzz:
 
 smoke: build up
 	sh scripts/smoke.sh
+
+# Live check of the modes and of the slots on the running stand: four gateway processes of bin/edigate
+# (two of mode full, one plain, one reqhash) with databases of their own and the mocks of the stand in
+# common. Needs the stand (make up) and the Docker host name host.docker.internal.
+slots: build
+	sh scripts/slots.sh
 
 # Test only. Starts a stand with fault injection (eight gateway processes that keep
 # dying, a mock-1c that loses answers), makes 50 orders with repeated calls, and

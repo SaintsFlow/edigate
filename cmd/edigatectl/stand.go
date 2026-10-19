@@ -67,10 +67,10 @@ var (
 	reTemplate = regexp.MustCompile(`^tpl_[a-z_]{1,40}$`)
 )
 
-// fixturesLoad is "fixtures load <file> [--partner-tokens-out <file>]". The file may come
-// before or after the flag.
+// fixturesLoad is "fixtures load <file> [--partner-tokens-out <file> [--reply-url <url>]]".
+// The file may come before or after the flags.
 func fixturesLoad(ctx context.Context, args []string, out io.Writer) error {
-	const form = "fixtures: expected: load <fixtures.json> [--partner-tokens-out <file>]"
+	const form = "fixtures: expected: load <fixtures.json> [--partner-tokens-out <file> [--reply-url <url>]]"
 	var path string
 	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
 		path, args = args[0], args[1:]
@@ -78,6 +78,7 @@ func fixturesLoad(ctx context.Context, args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("fixtures load", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	tokensOut := fs.String("partner-tokens-out", "", "")
+	replyURL := fs.String("reply-url", "", "")
 	if err := fs.Parse(args); err != nil {
 		return usageError{form}
 	}
@@ -86,15 +87,35 @@ func fixturesLoad(ctx context.Context, args []string, out io.Writer) error {
 	} else if fs.NArg() != 0 || path == "" {
 		return usageError{form}
 	}
-	return loadFixtures(ctx, path, *tokensOut, out)
+	reply, err := replyBase(*replyURL)
+	if err != nil || (reply != "" && *tokensOut == "") {
+		return usageError{"fixtures load: --reply-url is an http(s) address of a gateway process and needs --partner-tokens-out"}
+	}
+	return loadFixtures(ctx, path, *tokensOut, reply, out)
+}
+
+// replyBase checks the --reply-url value and cuts it to scheme and host, the form in which the
+// partner emulator looks the key up ("" stays empty).
+func replyBase(v string) (string, error) {
+	if v == "" {
+		return "", nil
+	}
+	u, err := neturl.Parse(v)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil ||
+		(u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" {
+		return "", errors.New("not a base address")
+	}
+	return u.Scheme + "://" + u.Host, nil
 }
 
 // loadFixtures reads and checks the file, then writes it in one transaction. With
 // tokensOut set it then gives a token to every customer partner of the file that has none
 // and writes them to that file as JSON {"<partner id>": "<token>"}: partner-emulator reads
-// it to post its 997. A token that was issued before cannot be read back (only its hash is
-// stored), so the entries already in the file are kept.
-func loadFixtures(ctx context.Context, path, tokensOut string, out io.Writer) error {
+// it to post its 997. With replyURL set (a slot of the benchmark) the key is
+// "<reply url> <partner id>", so that several gateway processes can share one file. A
+// token that was issued before cannot be read back (only its hash is stored), so the
+// entries already in the file are kept.
+func loadFixtures(ctx context.Context, path, tokensOut, replyURL string, out io.Writer) error {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return err
@@ -115,13 +136,19 @@ func loadFixtures(ctx context.Context, path, tokensOut string, out io.Writer) er
 		if tokensOut == "" {
 			return nil
 		}
-		return writePartnerTokens(ctx, st, fx, tokensOut, out)
+		return writePartnerTokens(ctx, st, fx, tokensOut, replyURL, out)
 	})
 }
 
 // writePartnerTokens issues a token to each customer partner of the fixtures that has no
-// active one and adds it to the JSON file.
-func writePartnerTokens(ctx context.Context, st *store.Store, fx store.Fixtures, path string, out io.Writer) error {
+// active one and adds it to the JSON file. Other entries stay. Writers of one file wait for
+// each other (a lock file next to it), so slots may be set up in parallel.
+func writePartnerTokens(ctx context.Context, st *store.Store, fx store.Fixtures, path, replyURL string, out io.Writer) error {
+	unlock, err := lockFile(path + ".lock")
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	tokens := map[string]string{}
 	if raw, err := os.ReadFile(path); err == nil {
 		if err := json.Unmarshal(raw, &tokens); err != nil {
@@ -141,6 +168,9 @@ func writePartnerTokens(ctx context.Context, st *store.Store, fx store.Fixtures,
 		return fmt.Errorf("issue partner tokens: %w", err)
 	}
 	for id, token := range fresh {
+		if replyURL != "" {
+			id = replyURL + " " + id
+		}
 		tokens[id] = token
 	}
 	raw, err := json.MarshalIndent(tokens, "", "  ")

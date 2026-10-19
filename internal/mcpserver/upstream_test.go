@@ -477,13 +477,16 @@ func TestT_UP_06_OnlyConfiguredAddresses(t *testing.T) {
 	srv := server("redirector", redirect.URL+"/mcp")
 	r := newUpRig(t, []upstream.Server{srv}, map[string][]string{"ta": {"up.redirector.validate_address", "up.evil-validator.validate_address"}}, nil)
 
-	// The tool does not exist for the agent: not_found (forbidden has the code -32003, which the
-	// SDK reads as "client closing", so a tool call does not answer with it).
-	if _, reason := r.call(r.cs, "up.evil-validator.validate_address", map[string]any{"address": "1 Main St"}); reason != "not_found" {
-		t.Errorf("a server outside the config: reason = %q, want not_found", reason)
+	// A server outside the config is forbidden (-32031). The client of the SDK must stay
+	// connected after it: the next call on the same session still works.
+	if _, reason := r.call(r.cs, "up.evil-validator.validate_address", map[string]any{"address": "1 Main St"}); reason != "forbidden" {
+		t.Errorf("a server outside the config: reason = %q, want forbidden", reason)
 	}
-	if _, reason := r.call(r.cs, "up.not-a-server.get_rates", rateArgs); reason != "not_found" {
-		t.Errorf("unknown server: reason = %q, want not_found", reason)
+	if _, reason := r.call(r.cs, "up.not-a-server.get_rates", rateArgs); reason != "forbidden" {
+		t.Errorf("unknown server: reason = %q, want forbidden", reason)
+	}
+	if _, reason := r.call(r.cs, "erp.get_price_list", map[string]any{"sku": []string{"X"}}); reason == "unauthorized" || strings.Contains(reason, "closed") {
+		t.Errorf("the session broke after forbidden: %q", reason)
 	}
 	for name := range r.listed(r.cs) {
 		if strings.HasPrefix(name, "up.") {

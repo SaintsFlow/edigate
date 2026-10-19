@@ -120,6 +120,16 @@ The quarantined reader is configured with `EDIGATE_QUARANTINE_BASE_URL` (any Ope
 `EDIGATE_QUARANTINE_MODEL` and, if the API needs one, `EDIGATE_QUARANTINE_API_KEY`. An empty model switches
 `edi.extract_note` off.
 
+One binary plays every configuration of the benchmark: `edigate --mode full|plain|reqhash|no-sanitize|no-policy|no-bizkey|no-contracts`
+(or `EDIGATE_MODE`). The tool names stay the same. `full` is the gateway as described above. `plain` has the open tools of
+a gateway without protections: the model writes the partner, the prices and the quantities, the ERP and the
+warehouse are called at once without an external id, and the text of the partner is shown whole. `reqhash` adds a stored
+answer for a repeated request. The other four are `full` with one protection off (the sanitizer, the policy, the business
+key, the contracts). An unknown mode stops the start with exit code 2; `/healthz` shows the mode. Several processes can
+run side by side, each with its own database (`edigatectl db create <name>`), port and `EDIGATE_PUBLIC_URL`, and share the
+mocks: the partner emulator answers each one at its own address (see `.env.example`). `EDIGATE_TRANSPORT_LOG` writes
+a JSON line for every MCP request.
+
 `edigatectl parse <file>` checks an X12 file with the same strict parser and prints a JSON summary; the exit code is
 0 only when the envelope and every set are accepted.
 

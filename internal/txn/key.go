@@ -29,6 +29,27 @@ func Key(tenant, tool, partnerID, ref string) [32]byte {
 	return k
 }
 
+// RequestKey is the key of the weak configurations: SHA-256 of the length-prefixed parts
+// (as in Key) where the last part is the arguments of the call in the canonical form of
+// RFC 8785. The mode reqhash (C1) passes (tool, args), the mode no-bizkey (C3-A3) passes
+// (tenant, tool, args). Arguments that are not valid JSON are an error.
+func RequestKey(args []byte, parts ...string) ([32]byte, error) {
+	canonical, err := jcs.Transform(args)
+	if err != nil {
+		return [32]byte{}, err
+	}
+	h := sha256.New()
+	for _, part := range append(parts, string(canonical)) {
+		var n [4]byte
+		binary.BigEndian.PutUint32(n[:], uint32(len(part)))
+		h.Write(n[:])
+		h.Write([]byte(part))
+	}
+	var k [32]byte
+	copy(k[:], h.Sum(nil))
+	return k, nil
+}
+
 // BusinessKeyJSON is the form of the business key stored next to the idempotency
 // key: ["<partner_id>","<ref>"].
 func BusinessKeyJSON(partnerID, ref string) ([]byte, error) {

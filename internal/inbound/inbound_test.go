@@ -483,15 +483,25 @@ func TestAddressBucketIsSharedByBothEntrances(t *testing.T) {
 	wantReason(t, got, "rate_limited")
 }
 
-func TestPartnerBucketLimitsInterchanges(t *testing.T) {
+// T-RATE-03: a partner has 2 interchanges in a second; the third gets 429 rate_limited.
+func TestT_RATE_03_ThirdInterchangeInASecondIsRefused(t *testing.T) {
 	r := newRig(t)
 	me, tok := r.fresh("ta", "customer")
-	var last sent
-	for i := 0; i < 3; i++ {
-		last = r.post(tok, me, gatewayID, "<1>", exchange(t, "850_min.edi", me, fmt.Sprintf("00000050%d", i)))
+	started := time.Now()
+	var got [3]sent
+	for i := range got {
+		got[i] = r.post(tok, me, gatewayID, fmt.Sprintf("<rl%d>", i), exchange(t, "850_min.edi", me, fmt.Sprintf("00000050%d", i)))
 	}
-	wantStatus(t, last, 429)
-	wantReason(t, last, "rate_limited")
+	if time.Since(started) > 400*time.Millisecond {
+		t.Skip("the machine is too slow for a test about one second")
+	}
+	wantStatus(t, got[0], 200)
+	wantStatus(t, got[1], 200)
+	wantStatus(t, got[2], 429)
+	wantReason(t, got[2], "rate_limited")
+	// Another partner of the same tenant is not slowed down.
+	other, otherTok := r.fresh("ta", "customer")
+	wantStatus(t, r.post(otherTok, other, gatewayID, "<rl9>", exchange(t, "850_min.edi", other, "000000509")), 200)
 }
 
 // ---- envelope and set faults ----

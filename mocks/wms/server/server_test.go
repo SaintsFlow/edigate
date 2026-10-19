@@ -111,6 +111,41 @@ func TestShipmentFacts(t *testing.T) {
 	}
 }
 
+// A request without an external id (a client without keys, like configuration C0) always makes
+// a new row, and the answer of a shipment carries the labels and the shipped lines, since there
+// is no key to look them up by.
+func TestRequestsWithoutAnExternalID(t *testing.T) {
+	_, ts, count := newMock(t, Config{})
+	keyless := `{"tenant_id":"ta","order_ref":"PO-1","lines":[{"sku":"SKU-1","qty":"4","unit":"EA"}]}`
+	var labels []string
+	for range 2 {
+		code, answer := post(t, ts.URL+"/shipments", keyless)
+		if code != http.StatusCreated {
+			t.Fatalf("ship: %d %s", code, answer)
+		}
+		var got struct {
+			ExternalID *string `json:"external_id"`
+			Lines      []struct{ SKU, Qty string }
+			SSCC       []string
+		}
+		if err := json.Unmarshal([]byte(answer), &got); err != nil || got.ExternalID != nil || len(got.SSCC) != 1 || len(got.Lines) != 1 || got.Lines[0].Qty != "4.000" {
+			t.Fatalf("answer: %s (%v)", answer, err)
+		}
+		labels = append(labels, got.SSCC[0])
+	}
+	if labels[0] == labels[1] {
+		t.Error("two shipments without a key got the same SSCC")
+	}
+	for range 2 {
+		if code, _ := post(t, ts.URL+"/reservations", keyless); code != http.StatusCreated {
+			t.Fatalf("reserve: %d", code)
+		}
+	}
+	if n := count(`SELECT count(*) FROM mock_wms.shipments WHERE external_id IS NULL`) + count(`SELECT count(*) FROM mock_wms.reservations WHERE external_id IS NULL`); n != 4 {
+		t.Errorf("rows without an external id = %d, want 4", n)
+	}
+}
+
 func TestShipmentRefusedByPrefix(t *testing.T) {
 	_, ts, count := newMock(t, Config{RejectRefPrefix: "PO-"})
 	if code, _ := post(t, ts.URL+"/shipments", body); code != http.StatusUnprocessableEntity {

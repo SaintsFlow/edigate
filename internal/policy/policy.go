@@ -174,6 +174,19 @@ func (e *Engine) Decide(ctx context.Context, p Principal, c ToolCall) (Decision,
 	return d, nil
 }
 
+// AllowAll is the policy of the mode no-policy (C3-A2): every call is allowed at once, with
+// no tier, no approval request and no daily counter. The data checks of the tools (a SKU that
+// is not in the price list, a missing business reference) are not policy and stay.
+type AllowAll struct{}
+
+// Decide allows the call.
+func (AllowAll) Decide(context.Context, Principal, ToolCall) (Decision, error) {
+	return Decision{Allow: true, Approval: ApprovalNone, Deny: []string{}, Fired: []string{}}, nil
+}
+
+// Counts tells the tools not to count the amount against the daily limit of the partner.
+func (AllowAll) Counts() bool { return false }
+
 // buildInput makes the input document of the policy.
 func buildInput(p Principal, c ToolCall) (map[string]any, error) {
 	raw, err := json.Marshal(c.Effect)

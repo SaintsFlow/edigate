@@ -2,7 +2,8 @@
 //
 // Settings from the environment: PARTNER_DB_URL (required; it writes only to its schema
 // mock_partner), PARTNER_LISTEN (default 127.0.0.1:8083), GATEWAY_URL (where the 997 goes),
-// PARTNER_TOKENS_FILE (JSON {"<partner id>": "<token>"}, read again at every send), and the
+// PARTNER_TOKENS_FILE (JSON {"<partner id>": "<token>"}, read again at every send; a key
+// "<reply url> <partner id>" is the token at one gateway process and is looked up first), and the
 // knobs PARTNER_ACK_DELAY_MS, PARTNER_ACK_STATUS (A, E, R, P or none, default A),
 // PARTNER_MDN_DELAY_MS and PARTNER_MDN_DROP (0 to 1). POST /control changes the knobs at
 // run time ({"ack_delay_ms", "ack_status", "mdn_delay_ms", "mdn_drop"}).

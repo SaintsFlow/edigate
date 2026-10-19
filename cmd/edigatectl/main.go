@@ -7,7 +7,8 @@
 //	edigatectl call --url URL --token TOKEN <tool> [JSON-arguments]
 //	edigatectl parse <file>
 //	edigatectl send --url URL --token T --from Q:ID --to Q:ID --file F [--message-id ID]
-//	edigatectl fixtures load <fixtures.json> [--partner-tokens-out <file>]
+//	edigatectl fixtures load <fixtures.json> [--partner-tokens-out <file> [--reply-url <url>]]
+//	edigatectl db create|drop <name>
 //	edigatectl txn reopen --url URL --token OPERATOR_TOKEN <key-hex>
 //	edigatectl approvals list|approve|reject --url URL --token OPERATOR_TOKEN [--status S] [id]
 //
@@ -19,7 +20,10 @@
 // "fixtures load" reads the file of the corpus generator (tenant, partners with
 // limits, price list) and is safe to run again. With --partner-tokens-out it also issues
 // a token to each customer partner that has none and adds it to the JSON file
-// partner-emulator reads. "txn reopen" is an operator
+// partner-emulator reads; with --reply-url (the public address of one gateway process, a
+// slot of the benchmark) the keys of that slot are "<url> <partner id>" and the entries of
+// other slots stay. "db create|drop" makes and removes the database of a slot on the server
+// of EDIGATE_DB_URL. "txn reopen" is an operator
 // action and goes over HTTP to /ops/ of the gateway at URL (for example
 // http://127.0.0.1:18080), so the audit log knows the operator. "approvals" lists
 // the approval requests of the operator's tenant and approves or rejects one; a
@@ -68,7 +72,8 @@ const usage = `usage:
   edigatectl call --url URL --token TOKEN <tool> [JSON-arguments]
   edigatectl parse <file>
   edigatectl send --url URL --token T --from Q:ID --to Q:ID --file F [--message-id ID]
-  edigatectl fixtures load <fixtures.json> [--partner-tokens-out <file>]
+  edigatectl fixtures load <fixtures.json> [--partner-tokens-out <file> [--reply-url <url>]]
+  edigatectl db create|drop <name>
   edigatectl txn reopen --url URL --token OPERATOR_TOKEN <key-hex>
   edigatectl approvals list|approve|reject --url URL --token OPERATOR_TOKEN [--status S] [id]
   edigatectl manifests keygen --out FILE
@@ -122,7 +127,9 @@ func run(ctx context.Context, args []string, stdout io.Writer) error {
 		if len(args) >= 3 && args[1] == "load" {
 			return fixturesLoad(ctx, args[2:], stdout)
 		}
-		return usageError{"fixtures: expected: load <fixtures.json> [--partner-tokens-out <file>]"}
+		return usageError{"fixtures: expected: load <fixtures.json> [--partner-tokens-out <file> [--reply-url <url>]]"}
+	case "db":
+		return dbCommand(ctx, args[1:], stdout)
 	case "txn":
 		if len(args) >= 2 && args[1] == "reopen" {
 			return txnReopen(ctx, args[2:], stdout)

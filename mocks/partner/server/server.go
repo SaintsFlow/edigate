@@ -8,6 +8,11 @@
 // written to mock_partner.received, also a repeat with the same ISA13: a test counts the
 // different ISA13 values to see how many documents the partner really got.
 //
+// Several gateway processes may share one emulator (the slots of the benchmark). A process
+// names itself in the header Edigate-Reply-To of /as2; its 997 goes to that address with the
+// token of "<address> <partner id>" in the tokens file (else "<partner id>"). Without the
+// header the 997 goes to GATEWAY_URL.
+//
 // The emulator is also the mail service of the stand: POST /email takes a letter as a
 // template id, an address and an order number, makes the text itself and writes a row with
 // kind = 'email' (once per external_id); GET /email?external_id= says whether it is there.
@@ -33,6 +38,7 @@ import (
 	mrand "math/rand/v2"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -176,6 +182,11 @@ func (s *Server) receive(w http.ResponseWriter, r *http.Request) {
 		reply(w, http.StatusBadRequest, map[string]string{"error": "AS2-From, AS2-To and Message-Id are required"})
 		return
 	}
+	replyTo, ok := replyAddress(r.Header.Get(ReplyToHeader))
+	if !ok {
+		reply(w, http.StatusBadRequest, map[string]string{"error": ReplyToHeader + " must be an http or https address"})
+		return
+	}
 	sum := sha256.Sum256(body)
 	receipt := mdn{MessageID: newID() + "@edigate-partner", OriginalMessageID: messageID, MICSHA256: hex.EncodeToString(sum[:]), Disposition: dispositionOK}
 
@@ -200,7 +211,7 @@ func (s *Server) receive(w http.ResponseWriter, r *http.Request) {
 
 	k := s.current()
 	s.wg.Add(1)
-	go s.acknowledge(k, from, to, ic)
+	go s.acknowledge(k, from, to, replyTo, ic)
 
 	if k.MDNDelayMS > 0 {
 		select {
@@ -253,8 +264,29 @@ func first(set x12.Set, id string, n int) string {
 	return ""
 }
 
+// ReplyToHeader is the stand header in which a gateway process says where its 997 must be
+// posted: its own public address. Without it the 997 goes to GATEWAY_URL. Several processes
+// of the gateway (the slots of the benchmark) share this emulator, and each gets its own.
+const ReplyToHeader = "Edigate-Reply-To"
+
+// replyAddress checks the value of the header. An empty value is allowed (no header). The
+// address is the base of the gateway without a path, a query or credentials; a trailing
+// slash is cut. The emulator posts only to what this accepts and to GATEWAY_URL.
+func replyAddress(v string) (string, bool) {
+	if v == "" {
+		return "", true
+	}
+	u, err := url.Parse(v)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil ||
+		(u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" {
+		return "", false
+	}
+	return u.Scheme + "://" + u.Host, true
+}
+
 // acknowledge sends the 997 of a transmission after the delay, unless the knob says none.
-func (s *Server) acknowledge(k Knobs, gateway, partner string, ic *x12.Interchange) {
+// replyTo is the address from the header, "" for GATEWAY_URL.
+func (s *Server) acknowledge(k Knobs, gateway, partner, replyTo string, ic *x12.Interchange) {
 	defer s.wg.Done()
 	if k.AckStatus == "none" {
 		return
@@ -268,7 +300,7 @@ func (s *Server) acknowledge(k Knobs, gateway, partner string, ic *x12.Interchan
 			s.cfg.Log.Error("build the 997 failed", "error", err.Error())
 			continue
 		}
-		if err := s.post(partner, gateway, raw); err != nil {
+		if err := s.post(partner, gateway, replyTo, raw); err != nil {
 			s.cfg.Log.Error("send the 997 failed", "error", err.Error())
 		}
 	}
@@ -337,13 +369,17 @@ func (s *Server) build997(status, gateway, partner string, g x12.Group) ([]byte,
 
 // post sends the 997 to the gateway with the token of this partner. The gateway lets a
 // partner post two interchanges per second, so a 429 is tried again after a pause.
-func (s *Server) post(partner, gateway string, raw []byte) error {
-	token, err := s.token(partner)
+func (s *Server) post(partner, gateway, replyTo string, raw []byte) error {
+	base := strings.TrimRight(s.cfg.GatewayURL, "/")
+	if replyTo != "" {
+		base = replyTo
+	}
+	token, err := s.token(base, partner)
 	if err != nil {
 		return err
 	}
 	for attempt := 0; attempt < 8; attempt++ {
-		req, err := http.NewRequest(http.MethodPost, strings.TrimRight(s.cfg.GatewayURL, "/")+"/edi/inbound", bytes.NewReader(raw))
+		req, err := http.NewRequest(http.MethodPost, base+"/edi/inbound", bytes.NewReader(raw))
 		if err != nil {
 			return err
 		}
@@ -370,7 +406,9 @@ func (s *Server) post(partner, gateway string, raw []byte) error {
 }
 
 // token reads the file of tokens again, so a stand can fill it after the emulator started.
-func (s *Server) token(partner string) (string, error) {
+// The key "<address> <partner id>" (the address of one gateway process) is looked up first,
+// then "<partner id>".
+func (s *Server) token(address, partner string) (string, error) {
 	raw, err := os.ReadFile(s.cfg.TokensFile)
 	if err != nil {
 		return "", fmt.Errorf("read the tokens file: %w", err)
@@ -379,7 +417,10 @@ func (s *Server) token(partner string) (string, error) {
 	if err := json.Unmarshal(raw, &tokens); err != nil {
 		return "", fmt.Errorf("the tokens file: %w", err)
 	}
-	t := tokens[partner]
+	t := tokens[address+" "+partner]
+	if t == "" {
+		t = tokens[partner]
+	}
 	if t == "" {
 		return "", fmt.Errorf("no token for partner %q", x12.Printable(partner))
 	}

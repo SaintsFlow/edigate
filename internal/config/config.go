@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/url"
 	"os"
 	"strconv"
 	"time"
@@ -36,6 +37,13 @@ type Config struct {
 	// warehouse effects queued; an empty PartnerURL leaves the documents for the partner queued.
 	WMSURL     string `yaml:"wms_url"`
 	PartnerURL string `yaml:"partner_url"`
+
+	// Stand settings of the benchmark slots (protocol section 6). PublicURL is the address at which the
+	// partner emulator reaches this process; the gateway sends it in the header Edigate-Reply-To, so
+	// that the 997 of a document comes back to the process that sent it. TransportLog is a file that
+	// gets one JSON line for every MCP request. Both are empty outside the benchmark.
+	PublicURL    string `yaml:"public_url"`
+	TransportLog string `yaml:"transport_log"`
 
 	// The upstream MCP servers the gateway may pass tools of on (flow P8), the public key
 	// (base64, ed25519) that verifies their pinned descriptions, and the up.* tools each
@@ -97,6 +105,12 @@ func Load(path string) (Config, error) {
 	}
 	if v := os.Getenv("EDIGATE_MANIFEST_PUBKEY"); v != "" {
 		c.ManifestPubKey = v
+	}
+	if v := os.Getenv("EDIGATE_PUBLIC_URL"); v != "" {
+		c.PublicURL = v
+	}
+	if v := os.Getenv("EDIGATE_TRANSPORT_LOG"); v != "" {
+		c.TransportLog = v
 	}
 	if c.Listen == "" {
 		c.Listen = defaultListen
@@ -189,6 +203,11 @@ func (c Config) check() error {
 	}
 	if _, _, err := net.SplitHostPort(c.Listen); err != nil {
 		return fmt.Errorf("EDIGATE_LISTEN %q: %w", c.Listen, err)
+	}
+	if c.PublicURL != "" {
+		if u, err := url.Parse(c.PublicURL); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			return fmt.Errorf("EDIGATE_PUBLIC_URL %q must be an http or https address", c.PublicURL)
+		}
 	}
 	if c.QuarantineModel != "" && c.QuarantineBaseURL == "" {
 		return errors.New("EDIGATE_QUARANTINE_BASE_URL is required when EDIGATE_QUARANTINE_MODEL is set")

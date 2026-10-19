@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -121,7 +122,7 @@ func TestT_EDGE_01_NoToken(t *testing.T) {
 	r := newRig(t)
 	rec := r.do(reqOpts{})
 	e := decode(t, rec)
-	if rec.Code != 401 || e.Error.Code != -32001 || e.Error.Data.Reason != "unauthorized" {
+	if rec.Code != 401 || e.Error.Code != -32030 || e.Error.Data.Reason != "unauthorized" {
 		t.Fatalf("got %d %+v", rec.Code, e)
 	}
 	if rec.Header().Get("WWW-Authenticate") != "Bearer" {
@@ -149,7 +150,7 @@ func TestT_EDGE_01_OperatorForbidden(t *testing.T) {
 	r := newRig(t)
 	rec := r.do(reqOpts{token: r.operator})
 	e := decode(t, rec)
-	if rec.Code != 403 || e.Error.Code != -32003 || e.Error.Data.Reason != "forbidden" {
+	if rec.Code != 403 || e.Error.Code != -32031 || e.Error.Data.Reason != "forbidden" {
 		t.Fatalf("got %d %+v", rec.Code, e)
 	}
 }
@@ -255,9 +256,9 @@ func (b bearer) RoundTrip(r *http.Request) (*http.Response, error) {
 	return b.next.RoundTrip(r)
 }
 
-// Six failed checks from one address: the sixth and seventh get 429 and the
-// principal lookup is not called for them.
-func TestT_EDGE_01_AddressBucket(t *testing.T) {
+// T-RATE-02: six failed checks from one address in a second: the sixth and seventh get 429
+// and the principal lookup (the database) is not called for them.
+func TestT_RATE_02_AddressBucket(t *testing.T) {
 	r := newRig(t)
 	bad, _, _ := store.NewToken()
 	for i := 1; i <= 5; i++ {
@@ -286,7 +287,8 @@ func TestT_EDGE_01_AddressBucket(t *testing.T) {
 	}
 }
 
-func TestT_EDGE_01_SuccessfulChecksDoNotSpendAddressBucket(t *testing.T) {
+// T-RATE-02: good checks do not spend the bucket of the address (agents behind one NAT).
+func TestT_RATE_02_SuccessfulChecksDoNotSpendAddressBucket(t *testing.T) {
 	r := newRig(t)
 	// One hundred valid requests from one address, each from its own principal so
 	// that the per-principal bucket is not the limit.
@@ -304,16 +306,33 @@ func TestT_EDGE_01_SuccessfulChecksDoNotSpendAddressBucket(t *testing.T) {
 	}
 }
 
-func TestT_EDGE_01_PrincipalBucket(t *testing.T) {
+// T-RATE-01: a principal has 20 requests in a second; the 21st is rate_limited. Another
+// principal is not slowed down by it.
+func TestT_RATE_01_PrincipalBucket(t *testing.T) {
 	r := newRig(t)
-	got429 := false
-	for i := 0; i < 40; i++ {
-		if rec := r.do(reqOpts{token: r.token}); rec.Code == 429 {
-			got429 = true
-			break
+	started := time.Now()
+	var codes [21]int
+	var last errBody
+	for i := range codes {
+		rec := r.do(reqOpts{token: r.token})
+		codes[i] = rec.Code
+		if i == 20 {
+			last = decode(t, rec)
 		}
 	}
-	if !got429 {
-		t.Error("principal bucket never limited 40 immediate requests")
+	if time.Since(started) > 40*time.Millisecond {
+		t.Skip("the machine is too slow for a test about one second")
+	}
+	for i := 0; i < 20; i++ {
+		if codes[i] != 200 {
+			t.Fatalf("request %d: got %d, want 200", i+1, codes[i])
+		}
+	}
+	if codes[20] != 429 || last.Error.Code != -32029 || last.Error.Data.Reason != "rate_limited" {
+		t.Fatalf("request 21: got %d %+v, want 429 rate_limited", codes[20], last)
+	}
+	other := r.add("agent-2", "agent")
+	if rec := r.do(reqOpts{token: other}); rec.Code != 200 {
+		t.Errorf("another principal: got %d, want 200", rec.Code)
 	}
 }

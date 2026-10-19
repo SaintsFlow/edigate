@@ -309,14 +309,13 @@ func (g *Gateway) report(ctx context.Context, actor *Actor, tools []Tool) {
 }
 
 // Resolve finds the upstream tool behind a name the agent used and checks its pin now. A
-// server that is not in the config and a tool the server does not have are both
-// not_found (the code of forbidden, -32003, is the one the SDK reads as "client closing",
-// so a tool call cannot answer with it); a tool that is not ok is manifest_drift.
+// server that is not in the config is forbidden, a tool the server does not have is
+// not_found, and a tool that is not ok is manifest_drift.
 func (g *Gateway) Resolve(ctx context.Context, publicName string, actor Actor) (Tool, error) {
 	server, tool, ok := SplitName(publicName)
 	srv, known := g.servers[server]
 	if !ok || !known {
-		return Tool{}, rpcerr.New(rpcerr.NotFound, "")
+		return Tool{}, rpcerr.New(rpcerr.Forbidden, "")
 	}
 	tools, err := g.Inspect(ctx, srv)
 	if err != nil {

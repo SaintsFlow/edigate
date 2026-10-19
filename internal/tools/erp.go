@@ -64,7 +64,11 @@ func CreateSalesOrder(ctx context.Context, st *store.Store, dec Decider, c Calle
 	if err != nil {
 		return OrderResult{}, err
 	}
-	header, lines, err := document.Decode("850", src.Body)
+	body, err := bodyOf(ctx, st, c, src.ID, src.Body)
+	if err != nil {
+		return OrderResult{}, err
+	}
+	header, lines, err := document.Decode("850", body)
 	if err != nil {
 		return OrderResult{}, err
 	}
@@ -88,7 +92,7 @@ func CreateSalesOrder(ctx context.Context, st *store.Store, dec Decider, c Calle
 		return OrderResult{}, err
 	}
 
-	businessKey, err := txn.BusinessKeyJSON(src.PartnerID, src.BKRef)
+	key, businessKey, err := requestKeys(c, CreateOrderTool, src.PartnerID, src.BKRef, src.PartnerID, src.BKRef)
 	if err != nil {
 		return OrderResult{}, err
 	}
@@ -116,7 +120,7 @@ func CreateSalesOrder(ctx context.Context, st *store.Store, dec Decider, c Calle
 	return reserveEffect(ctx, st, dec, c, effectRequest{
 		Tool: CreateOrderTool, EffectType: effectCreateOrder, Src: src, ST01: "850",
 		Effect: payload, AmountCents: amount, Counted: true, ViewArgs: view,
-		Key: txn.Key(c.TenantID, CreateOrderTool, src.PartnerID, src.BKRef), BusinessKey: businessKey,
+		Key: key, BusinessKey: businessKey,
 		ReqHash: reqHash, Payload: rawPayload,
 		Saga: &store.SagaLink{
 			Kind: "order", StepNo: 1, Steps: []string{adapters.EffectCreateOrder, adapters.EffectSend855},

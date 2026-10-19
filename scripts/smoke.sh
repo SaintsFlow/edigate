@@ -156,6 +156,7 @@ echo "ok: a empty inbox"
 code=$(post "" "$TMP/b")
 [ "$code" = 401 ] || fail "b: expected HTTP 401, got $code"
 expect "b unauthorized" "$(cat "$TMP/b")" '"reason":"unauthorized"'
+expect "b code" "$(cat "$TMP/b")" '"code":-32030'
 
 # (c) Mcp-Name differs from the body: 400 and code -32020
 code=$(post "$AGENT_TOKEN" "$TMP/c" -H 'MCP-Protocol-Version: 2026-07-28' -H 'Mcp-Method: tools/call' -H 'Mcp-Name: edi.read_document')
@@ -166,6 +167,7 @@ expect "c header mismatch" "$(cat "$TMP/c")" '"code":-32020'
 code=$(post "$OPERATOR_TOKEN" "$TMP/d")
 [ "$code" = 403 ] || fail "d: expected HTTP 403, got $code"
 expect "d forbidden" "$(cat "$TMP/d")" '"reason":"forbidden"'
+expect "d code" "$(cat "$TMP/d")" '"code":-32031'
 
 # (e) input out of range: exit code 1 and schema_invalid
 rc=0

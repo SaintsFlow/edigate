@@ -16,7 +16,10 @@ import (
 	"github.com/google/jsonschema-go/jsonschema"
 )
 
-//go:embed schemas/*.json notes/*.json
+// schemas/plain/ holds the schemas of the open tools (modes plain, reqhash and no-contracts):
+// they are used under the name "plain/<tool>" by Input, Output, Validate and ValidateOutput.
+//
+//go:embed schemas/*.json schemas/plain/*.json notes/*.json
 var files embed.FS
 
 // ErrInvalid marks arguments or results that do not match their schema.

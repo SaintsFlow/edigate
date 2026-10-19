@@ -45,8 +45,15 @@ func (r Receipt) Counts(t Transmission) bool {
 // It sends once and returns the synchronous MDN; deciding what a missing or wrong MDN
 // means, and when to repeat, is the relay's job.
 type AS2 struct {
-	base string
-	http *http.Client
+	base    string
+	http    *http.Client
+	replyTo string
+}
+
+// WithReplyTo makes the client send the stand header Edigate-Reply-To (see ReplyToHeader).
+func (a *AS2) WithReplyTo(publicURL string) *AS2 {
+	a.replyTo = publicURL
+	return a
 }
 
 // NewAS2 builds the client for the partner at baseURL (EDIGATE_PARTNER_URL).
@@ -64,6 +71,9 @@ func (a *AS2) Transmit(ctx context.Context, t Transmission) (Receipt, error) {
 	req.Header.Set("AS2-From", t.From)
 	req.Header.Set("AS2-To", t.To)
 	req.Header.Set("Message-Id", t.MessageID)
+	if a.replyTo != "" {
+		req.Header.Set(ReplyToHeader, a.replyTo)
+	}
 	resp, err := a.http.Do(req)
 	if err != nil {
 		return Receipt{}, err

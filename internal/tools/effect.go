@@ -3,13 +3,16 @@ package tools
 import (
 	"cmp"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"slices"
 
 	"github.com/SaintsFlow/edigate/internal/approval"
 	"github.com/SaintsFlow/edigate/internal/policy"
 	"github.com/SaintsFlow/edigate/internal/rpcerr"
 	"github.com/SaintsFlow/edigate/internal/store"
+	"github.com/SaintsFlow/edigate/internal/txn"
 )
 
 // This file is the one path every tool with an effect takes after it has built the
@@ -21,13 +24,60 @@ type Decider interface {
 	Decide(ctx context.Context, p policy.Principal, c policy.ToolCall) (policy.Decision, error)
 }
 
-// Caller is the identity a tool call runs under, taken from the edge.
+// Caller is the identity a tool call runs under, taken from the edge, and the switches of the
+// ablation modes of the benchmark (the zero value is the full gateway).
 type Caller struct {
 	TenantID    string
 	PrincipalID string
 	Kind        string
 	TraceID     string
+
+	// Args are the raw arguments of the call. ArgsKey (mode no-bizkey, C3-A3) makes the
+	// idempotency key of the call from them instead of from the business key. RawValues (mode
+	// no-sanitize, C3-A1) makes the effects take the raw value of an element that failed its format.
+	Args      json.RawMessage
+	ArgsKey   bool
+	RawValues bool
 }
+
+// requestKeys returns the idempotency key of a call and the business key stored next to it. The
+// key is made of the tool, the partner and the reference (keyRef), which are the business key
+// (I2); bk are the parts of the business key that are stored. In the mode no-bizkey the key is
+// made of the tenant, the tool and the canonical arguments, and the key itself is added to the
+// stored business key as a third part, so that two orders with one reference are two sagas.
+func requestKeys(c Caller, tool, partnerID, keyRef string, bk ...string) (key [32]byte, businessKey []byte, err error) {
+	if !c.ArgsKey || len(c.Args) == 0 {
+		businessKey, err = json.Marshal(bk)
+		return txn.Key(c.TenantID, tool, partnerID, keyRef), businessKey, err
+	}
+	if key, err = txn.RequestKey(c.Args, c.TenantID, tool); err != nil {
+		return key, nil, rpcerr.New(rpcerr.SchemaInvalid, "")
+	}
+	businessKey, err = json.Marshal(append(slices.Clone(bk), hex.EncodeToString(key[:])))
+	return key, businessKey, err
+}
+
+// stepKeys is requestKeys for a step of a saga that already exists (confirm, reserve, ship, the
+// documents of the sagas): the business key is the one of the saga, third part included.
+func stepKeys(c Caller, tool string, o store.OrderSaga) ([32]byte, []byte, error) {
+	if c.ArgsKey && len(c.Args) > 0 {
+		key, err := txn.RequestKey(c.Args, c.TenantID, tool)
+		if err != nil {
+			return key, nil, rpcerr.New(rpcerr.SchemaInvalid, "")
+		}
+		return key, o.BusinessKey, nil
+	}
+	ref := o.Ref
+	var parts []string
+	if json.Unmarshal(o.BusinessKey, &parts) == nil && len(parts) > 2 {
+		ref += "\x00" + parts[2]
+	}
+	return txn.Key(c.TenantID, tool, o.PartnerID, ref), o.BusinessKey, nil
+}
+
+// countsDaily is implemented by a Decider that does not use the daily counter of the
+// partner (policy.AllowAll); every other decider uses it.
+type countsDaily interface{ Counts() bool }
 
 // effectRequest is a tool call that is ready to be decided and reserved.
 type effectRequest struct {
@@ -97,7 +147,11 @@ func reserveEffect(ctx context.Context, st *store.Store, dec Decider, c Caller, 
 		DocumentID: r.Src.ID, Key: r.Key[:], BusinessKey: r.BusinessKey, ReqHash: r.ReqHash,
 		EffectType: r.EffectType, Payload: r.Payload, ReviewView: reviewView, Saga: r.Saga,
 	}
-	if r.Counted && known {
+	counts := true
+	if d, ok := dec.(countsDaily); ok {
+		counts = d.Counts()
+	}
+	if r.Counted && known && counts {
 		in.PartnerID, in.AmountCents = r.Src.PartnerID, r.AmountCents
 	}
 	in.Decide = func(dailyAutoCents int64) (store.Verdict, error) {

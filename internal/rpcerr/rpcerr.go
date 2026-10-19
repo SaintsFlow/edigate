@@ -42,9 +42,11 @@ type entry struct {
 // table maps each reason to its JSON-RPC code and, for errors the edge can
 // produce, its HTTP status (zero when the error only comes from tools).
 var table = map[Reason]entry{
-	Unauthorized:         {-32001, http.StatusUnauthorized},
-	Forbidden:            {-32003, http.StatusForbidden},
-	NotFound:             {-32016, 0}, // not -32004: the go-sdk reads that code as "server is closing"
+	// The go-sdk reserves -32001 (unknown), -32003 (client closing), -32004 (server closing)
+	// and -32005 (rejected) and acts on them, so none of the codes below uses one.
+	Unauthorized:         {-32030, http.StatusUnauthorized},
+	Forbidden:            {-32031, http.StatusForbidden},
+	NotFound:             {-32016, 0},
 	SchemaInvalid:        {-32602, http.StatusBadRequest},
 	TaintedSink:          {-32010, 0},
 	PolicyDenied:         {-32011, 0},

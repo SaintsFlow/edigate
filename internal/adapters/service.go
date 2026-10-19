@@ -19,7 +19,14 @@ type service struct {
 	base   string
 	http   *http.Client
 	routes map[string]string
+	// replyTo is sent in the header ReplyToHeader of every request when it is set (the benchmark
+	// slots, see AS2 and Mail).
+	replyTo string
 }
+
+// ReplyToHeader is the stand header that tells the partner emulator where to post the 997:
+// the public address of the gateway process that sent the document.
+const ReplyToHeader = "Edigate-Reply-To"
 
 func newService(baseURL string, timeout time.Duration, routes map[string]string) service {
 	return service{base: strings.TrimRight(baseURL, "/"), http: &http.Client{Timeout: timeout}, routes: routes}
@@ -41,38 +48,51 @@ type answer struct {
 // apply posts the payload of the outbox row as it is, with the tenant and the external
 // id added. 201 (new) and 200 (already there) both succeed; the result is the id.
 func (s *service) apply(ctx context.Context, e Effect) (string, error) {
+	reply, err := s.post(ctx, e)
+	if err != nil {
+		return "", err
+	}
+	return refOf(reply)
+}
+
+// post sends the effect and returns the body of a successful answer. An effect without an
+// external id (the open tools of the modes plain and reqhash) is sent without the member, so
+// the other system cannot take a repeat for the same effect.
+func (s *service) post(ctx context.Context, e Effect) ([]byte, error) {
 	var body map[string]json.RawMessage
 	if err := json.Unmarshal(e.Payload, &body); err != nil {
-		return "", fmt.Errorf("payload is not an object: %w", err)
+		return nil, fmt.Errorf("payload is not an object: %w", err)
 	}
 	var err error
 	if body["tenant_id"], err = json.Marshal(e.TenantID); err != nil {
-		return "", err
+		return nil, err
 	}
-	if body["external_id"], err = json.Marshal(e.ExternalID); err != nil {
-		return "", err
+	if e.ExternalID != "" {
+		if body["external_id"], err = json.Marshal(e.ExternalID); err != nil {
+			return nil, err
+		}
 	}
 	raw, err := json.Marshal(body)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	path, err := s.route(e.Type)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.base+path, bytes.NewReader(raw))
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	status, reply, err := s.do(req)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	if status != http.StatusOK && status != http.StatusCreated {
-		return "", &StatusError{Code: status}
+		return nil, &StatusError{Code: status}
 	}
-	return refOf(reply)
+	return reply, nil
 }
 
 // exists asks the service for the effect of this type with this external id: 200 is a
@@ -123,6 +143,9 @@ func (s *service) compensate(ctx context.Context, e Effect, field, prefix, actio
 }
 
 func (s *service) do(req *http.Request) (int, []byte, error) {
+	if s.replyTo != "" {
+		req.Header.Set(ReplyToHeader, s.replyTo)
+	}
 	resp, err := s.http.Do(req)
 	if err != nil {
 		return 0, nil, err

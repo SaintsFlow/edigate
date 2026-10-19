@@ -41,7 +41,11 @@ func PostVendorInvoice(ctx context.Context, st *store.Store, dec Decider, c Call
 	if err != nil {
 		return OrderResult{}, err
 	}
-	header, lines, err := document.Decode("810", src.Body)
+	body, err := bodyOf(ctx, st, c, src.ID, src.Body)
+	if err != nil {
+		return OrderResult{}, err
+	}
+	header, lines, err := document.Decode("810", body)
 	if err != nil {
 		return OrderResult{}, err
 	}
@@ -61,22 +65,16 @@ func PostVendorInvoice(ctx context.Context, st *store.Store, dec Decider, c Call
 		return OrderResult{}, err
 	}
 
-	var order *policy.SupplierOrder
+	var orderRef string
 	if h.OrderRef != nil {
-		so, err := st.SupplierOrder(ctx, c.TenantID, src.PartnerID, *h.OrderRef)
-		switch {
-		case err == nil:
-			soLines, err := txn.NormSupplierOrder(so.Lines)
-			if err != nil {
-				return OrderResult{}, err
-			}
-			order = &policy.SupplierOrder{TotalCents: so.TotalCents, Currency: so.Currency, LinesNorm: policy.InvoiceLines(soLines)}
-		case !errors.Is(err, store.ErrNotFound):
-			return OrderResult{}, err
-		}
+		orderRef = *h.OrderRef
+	}
+	order, err := supplierOrderFor(ctx, st, c.TenantID, src.PartnerID, orderRef)
+	if err != nil {
+		return OrderResult{}, err
 	}
 
-	businessKey, err := txn.BusinessKeyJSON(src.PartnerID, src.BKRef)
+	key, businessKey, err := requestKeys(c, PostInvoiceTool, src.PartnerID, src.BKRef, src.PartnerID, src.BKRef)
 	if err != nil {
 		return OrderResult{}, err
 	}
@@ -103,7 +101,28 @@ func PostVendorInvoice(ctx context.Context, st *store.Store, dec Decider, c Call
 	return reserveEffect(ctx, st, dec, c, effectRequest{
 		Tool: PostInvoiceTool, EffectType: effectPostInvoice, Src: src, ST01: "810",
 		Effect: effect, AmountCents: amount, ViewArgs: view, SupplierOrder: order,
-		Key: txn.Key(c.TenantID, PostInvoiceTool, src.PartnerID, src.BKRef), BusinessKey: businessKey,
+		Key: key, BusinessKey: businessKey,
 		ReqHash: reqHash, Payload: rawPayload,
 	})
+}
+
+// supplierOrderFor reads the order to the supplier that an invoice names, in the form the
+// policy compares. An empty number or an order that is not there gives nil (the policy then
+// forbids the invoice).
+func supplierOrderFor(ctx context.Context, st *store.Store, tenantID, partnerID, orderRef string) (*policy.SupplierOrder, error) {
+	if orderRef == "" {
+		return nil, nil
+	}
+	so, err := st.SupplierOrder(ctx, tenantID, partnerID, orderRef)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	lines, err := txn.NormSupplierOrder(so.Lines)
+	if err != nil {
+		return nil, err
+	}
+	return &policy.SupplierOrder{TotalCents: so.TotalCents, Currency: so.Currency, LinesNorm: policy.InvoiceLines(lines)}, nil
 }
