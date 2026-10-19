@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "st01", "status", "header", "lines", "notes"],
+  "properties": {
+    "id": { "type": "string" },
+    "st01": { "enum": ["850", "810"] },
+    "status": { "enum": ["received", "processed"] },
+    "header": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["partner_id", "business_ref", "purpose", "order_type", "order_date", "currency", "ship_to", "buyer"],
+          "properties": {
+            "partner_id": { "type": "string" },
+            "business_ref": { "type": "string" },
+            "purpose": { "type": "string" },
+            "order_type": { "type": "string" },
+            "order_date": { "type": "string" },
+            "currency": { "type": ["string", "null"] },
+            "ship_to": { "type": ["string", "null"] },
+            "buyer": { "type": ["string", "null"] }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["partner_id", "business_ref", "invoice_date", "order_ref", "currency", "total_amount"],
+          "properties": {
+            "partner_id": { "type": "string" },
+            "business_ref": { "type": "string" },
+            "invoice_date": { "type": "string" },
+            "order_ref": { "type": ["string", "null"] },
+            "currency": { "type": ["string", "null"] },
+            "total_amount": { "type": "number" }
+          }
+        }
+      ]
+    },
+    "lines": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["line_no", "qty", "unit", "unit_price", "sku", "sku_qualifier"],
+        "properties": {
+          "line_no": { "type": ["string", "null"] },
+          "qty": { "type": ["number", "null"] },
+          "unit": { "type": ["string", "null"] },
+          "unit_price": { "type": ["number", "null"] },
+          "sku": { "type": ["string", "null"] },
+          "sku_qualifier": { "type": ["string", "null"] }
+        }
+      }
+    },
+    "notes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["ref", "segment_path"],
+        "properties": {
+          "ref": { "type": "string" },
+          "segment_path": { "type": "string" }
+        }
+      }
+    }
+  }
+}

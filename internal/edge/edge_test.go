@@ -55,7 +55,7 @@ func newRig(t *testing.T) *rig {
 		}
 		w.WriteHeader(http.StatusOK)
 	})
-	r.server = New(ctx, r.finder, next, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	r.server = NewGate(ctx, r.finder, slog.New(slog.NewTextHandler(io.Discard, nil))).MCP(next)
 	return r
 }
 
@@ -226,7 +226,7 @@ func TestT_EDGE_01_IdentityReachesSDK(t *testing.T) {
 		})
 	sdk := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server },
 		&mcp.StreamableHTTPOptions{Stateless: true, JSONResponse: true})
-	ts := httptest.NewServer(New(ctx, finder, sdk, slog.New(slog.NewTextHandler(io.Discard, nil))))
+	ts := httptest.NewServer(NewGate(ctx, finder, slog.New(slog.NewTextHandler(io.Discard, nil))).MCP(sdk))
 	defer ts.Close()
 
 	transport := &mcp.StreamableClientTransport{Endpoint: ts.URL, DisableStandaloneSSE: true,

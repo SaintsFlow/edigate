@@ -16,7 +16,7 @@ func TestMigrationsApply(t *testing.T) {
 	if err := s.CheckMigrated(ctx); err != nil {
 		t.Fatalf("CheckMigrated: %v", err)
 	}
-	for _, table := range []string{"tenants", "principals", "audit_log"} {
+	for _, table := range []string{"tenants", "principals", "audit_log", "partners", "edi_interchanges", "edi_documents", "edi_rejected"} {
 		var n int
 		if err := pool.QueryRow(ctx, "SELECT count(*) FROM "+table).Scan(&n); err != nil {
 			t.Errorf("table %s: %v", table, err)
@@ -44,7 +44,7 @@ func TestAuditLogRejectsUpdateAndDelete(t *testing.T) {
 func TestFindPrincipalByTokenHash(t *testing.T) {
 	s, _ := storetest.New(t)
 	ctx := context.Background()
-	if err := s.AddTenant(ctx, "t1", "Tenant One"); err != nil {
+	if err := s.AddTenant(ctx, "t1", "Tenant One", ""); err != nil {
 		t.Fatal(err)
 	}
 	token, sum, err := store.NewToken()
@@ -75,7 +75,7 @@ func TestFindPrincipalByTokenHash(t *testing.T) {
 func TestPartnerIDOnlyForPartnerKind(t *testing.T) {
 	s, _ := storetest.New(t)
 	ctx := context.Background()
-	if err := s.AddTenant(ctx, "t1", "Tenant One"); err != nil {
+	if err := s.AddTenant(ctx, "t1", "Tenant One", ""); err != nil {
 		t.Fatal(err)
 	}
 	_, sum, _ := store.NewToken()
@@ -85,5 +85,56 @@ func TestPartnerIDOnlyForPartnerKind(t *testing.T) {
 	_, sum, _ = store.NewToken()
 	if err := s.IssuePrincipal(ctx, store.Principal{ID: "p2", TenantID: "t1", Kind: "agent", PartnerID: "X:Y"}, sum); err == nil {
 		t.Error("agent with partner_id must be rejected")
+	}
+}
+
+func TestPartnerTokenNeedsARegisteredPartner(t *testing.T) {
+	s, _ := storetest.New(t)
+	ctx := context.Background()
+	if err := s.AddTenant(ctx, "t1", "Tenant One", "ZZ:ZZTESTSUPPL"); err != nil {
+		t.Fatal(err)
+	}
+	_, sum, _ := store.NewToken()
+	if err := s.IssuePrincipal(ctx, store.Principal{ID: "p1", TenantID: "t1", Kind: "partner", PartnerID: "ZZ:ZZTESTBUYER"}, sum); err == nil {
+		t.Error("a partner token for an unknown partner must be rejected")
+	}
+	if err := s.AddPartner(ctx, store.Partner{TenantID: "t1", PartnerID: "ZZ:ZZTESTBUYER", Role: "customer", Name: "Buyer"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.IssuePrincipal(ctx, store.Principal{ID: "p1", TenantID: "t1", Kind: "partner", PartnerID: "ZZ:ZZTESTBUYER"}, sum); err != nil {
+		t.Errorf("a partner token for a registered partner: %v", err)
+	}
+	access, err := s.PartnerAccess(ctx, "t1", "ZZ:ZZTESTBUYER")
+	if err != nil || access.Role != "customer" || !access.Active || access.GatewayID != "ZZ:ZZTESTSUPPL" {
+		t.Fatalf("access: %+v %v", access, err)
+	}
+	if _, err := s.PartnerAccess(ctx, "t1", "ZZ:NOBODY"); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("unknown partner: %v", err)
+	}
+	if err := s.AddPartner(ctx, store.Partner{TenantID: "t1", PartnerID: "ZZ:ZZTESTBUYER", Role: "bogus", Name: "x"}); err == nil {
+		t.Error("an unknown role must be rejected")
+	}
+}
+
+func TestInterchangeIDIsUniqueAndKeptOnReAdd(t *testing.T) {
+	s, _ := storetest.New(t)
+	ctx := context.Background()
+	if err := s.AddTenant(ctx, "t1", "One", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AddTenant(ctx, "t1", "One", "ZZ:ZZTESTSUPPL"); err != nil { // sets it on the existing tenant
+		t.Fatal(err)
+	}
+	if err := s.AddTenant(ctx, "t1", "One", ""); err != nil { // does not clear it
+		t.Fatal(err)
+	}
+	if err := s.AddPartner(ctx, store.Partner{TenantID: "t1", PartnerID: "ZZ:P", Role: "customer", Name: "P"}); err != nil {
+		t.Fatal(err)
+	}
+	if a, _ := s.PartnerAccess(ctx, "t1", "ZZ:P"); a.GatewayID != "ZZ:ZZTESTSUPPL" {
+		t.Fatalf("interchange id: %q", a.GatewayID)
+	}
+	if err := s.AddTenant(ctx, "t2", "Two", "ZZ:ZZTESTSUPPL"); err == nil {
+		t.Error("two tenants with one interchange id must be rejected")
 	}
 }

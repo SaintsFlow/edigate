@@ -1,19 +1,28 @@
 // Command edigatectl is the operator tool of the gateway.
 //
-//	edigatectl tenant add <id> <name>
+//	edigatectl tenant add <id> <name> [--interchange-id Q:ID]
+//	edigatectl partner add --tenant T --partner Q:ID --role customer|supplier --name N
 //	edigatectl token issue --tenant T --kind agent|operator|admin|partner --id P [--partner ISA05:ISA06]
 //	edigatectl token revoke --id P
 //	edigatectl call --url URL --token TOKEN <tool> [JSON-arguments]
+//	edigatectl parse <file>
+//	edigatectl send --url URL --token T --from Q:ID --to Q:ID --file F [--message-id ID]
 //
-// tenant and token commands work on the database directly (EDIGATE_DB_URL):
-// they are setup done on the gateway machine, not a network API. "token issue"
-// prints the token to stdout once; nothing else ever shows it.
-// "call" is a debugging MCP client. Exit codes: 0 ok, 1 failed (for call: the
-// server answered with a JSON-RPC error), 2 wrong command line.
+// tenant, partner and token commands work on the database directly
+// (EDIGATE_DB_URL): they are setup done on the gateway machine, not a network
+// API. "token issue" prints the token to stdout once; nothing else ever shows it.
+// "call" is a debugging MCP client. "parse" reads a file with the strict X12
+// parser and needs no database. "send" posts an interchange to /edi/inbound.
+// Exit codes: 0 ok, 1 failed (for call: the server answered with a JSON-RPC
+// error; for parse: something was rejected; for send: the answer was not 200),
+// 2 wrong command line.
 package main
 
 import (
+	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -21,20 +30,29 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"regexp"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/SaintsFlow/edigate/internal/edi/x12"
 	"github.com/SaintsFlow/edigate/internal/store"
 )
 
 const usage = `usage:
-  edigatectl tenant add <id> <name>
+  edigatectl tenant add <id> <name> [--interchange-id Q:ID]
+  edigatectl partner add --tenant T --partner Q:ID --role customer|supplier --name N
   edigatectl token issue --tenant T --kind agent|operator|admin|partner --id P [--partner ISA05:ISA06]
   edigatectl token revoke --id P
   edigatectl call --url URL --token TOKEN <tool> [JSON-arguments]
+  edigatectl parse <file>
+  edigatectl send --url URL --token T --from Q:ID --to Q:ID --file F [--message-id ID]
 `
+
+// qualifiedID is ISA05:ISA06 or ISA07:ISA08: a two-character qualifier and an
+// identifier of up to 15 characters.
+var qualifiedID = regexp.MustCompile(`^[A-Za-z0-9]{2}:[A-Za-z0-9._-]{1,15}$`)
 
 type usageError struct{ msg string }
 
@@ -61,10 +79,19 @@ func run(ctx context.Context, args []string, stdout io.Writer) error {
 	}
 	switch args[0] {
 	case "tenant":
-		if len(args) == 4 && args[1] == "add" {
-			return withStore(ctx, func(st *store.Store) error { return tenantAdd(ctx, st, args[2], args[3], stdout) })
+		if len(args) >= 4 && args[1] == "add" {
+			return tenantAdd(ctx, args[2], args[3], args[4:], stdout)
 		}
-		return usageError{"tenant: expected: add <id> <name>"}
+		return usageError{"tenant: expected: add <id> <name> [--interchange-id Q:ID]"}
+	case "partner":
+		if len(args) >= 2 && args[1] == "add" {
+			return partnerAdd(ctx, args[2:], stdout)
+		}
+		return usageError{"partner: expected: add --tenant T --partner Q:ID --role customer|supplier --name N"}
+	case "parse":
+		return parseFile(args[1:], stdout)
+	case "send":
+		return send(ctx, args[1:], stdout)
 	case "token":
 		if len(args) < 2 {
 			return usageError{"token: expected issue or revoke"}
@@ -100,12 +127,49 @@ func withStore(ctx context.Context, f func(*store.Store) error) error {
 	return f(st)
 }
 
-func tenantAdd(ctx context.Context, st *store.Store, id, name string, out io.Writer) error {
-	if err := st.AddTenant(ctx, id, name); err != nil {
-		return err
+// tenantAdd creates a tenant, or sets the interchange id of an existing one.
+func tenantAdd(ctx context.Context, id, name string, flags []string, out io.Writer) error {
+	fs := flag.NewFlagSet("tenant add", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	interchangeID := fs.String("interchange-id", "", "")
+	if err := fs.Parse(flags); err != nil || fs.NArg() != 0 {
+		return usageError{"tenant add: bad flags"}
 	}
-	fmt.Fprintln(out, "tenant ready:", id)
-	return nil
+	if *interchangeID != "" && !qualifiedID.MatchString(*interchangeID) {
+		return usageError{"tenant add: --interchange-id must look like ZZ:ZZTESTSUPPL"}
+	}
+	return withStore(ctx, func(st *store.Store) error {
+		if err := st.AddTenant(ctx, id, name, *interchangeID); err != nil {
+			return err
+		}
+		fmt.Fprintln(out, "tenant ready:", id)
+		return nil
+	})
+}
+
+func partnerAdd(ctx context.Context, args []string, out io.Writer) error {
+	fs := flag.NewFlagSet("partner add", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	tenant := fs.String("tenant", "", "")
+	partner := fs.String("partner", "", "")
+	role := fs.String("role", "", "")
+	name := fs.String("name", "", "")
+	if err := fs.Parse(args); err != nil || fs.NArg() != 0 {
+		return usageError{"partner add: bad flags"}
+	}
+	if *tenant == "" || *name == "" || !qualifiedID.MatchString(*partner) {
+		return usageError{"partner add: --tenant, --name and --partner ZZ:ID are required"}
+	}
+	if *role != "customer" && *role != "supplier" {
+		return usageError{"partner add: --role must be customer or supplier"}
+	}
+	return withStore(ctx, func(st *store.Store) error {
+		if err := st.AddPartner(ctx, store.Partner{TenantID: *tenant, PartnerID: *partner, Role: *role, Name: *name}); err != nil {
+			return fmt.Errorf("add partner: %w", err)
+		}
+		fmt.Fprintln(out, "partner ready:", *partner)
+		return nil
+	})
 }
 
 func tokenIssue(ctx context.Context, args []string, out io.Writer) error {
@@ -134,6 +198,13 @@ func tokenIssue(ctx context.Context, args []string, out io.Writer) error {
 		return usageError{"token issue: --tenant and --id are required"}
 	}
 	return withStore(ctx, func(st *store.Store) error {
+		if *kind == "partner" {
+			if _, err := st.PartnerAccess(ctx, *tenant, *partner); errors.Is(err, store.ErrNotFound) {
+				return errors.New("this partner is not registered for the tenant: run partner add first")
+			} else if err != nil {
+				return err
+			}
+		}
 		token, sum, err := store.NewToken()
 		if err != nil {
 			return err
@@ -221,6 +292,136 @@ func printRPCError(out io.Writer, err error) error {
 	}
 	fmt.Fprintln(out, string(body))
 	return errors.New("server returned an error")
+}
+
+// parseSummary is what "parse" prints: one JSON line about the file.
+type parseSummary struct {
+	Envelope string         `json:"envelope"` // accepted or rejected
+	Reason   string         `json:"reason,omitempty"`
+	Detail   string         `json:"detail,omitempty"`
+	Sender   string         `json:"sender,omitempty"`
+	Receiver string         `json:"receiver,omitempty"`
+	ISA13    string         `json:"isa13,omitempty"`
+	Groups   []groupSummary `json:"groups,omitempty"`
+}
+
+type groupSummary struct {
+	GS01 string       `json:"gs01"`
+	GS06 string       `json:"gs06"`
+	Sets []setSummary `json:"sets"`
+}
+
+type setSummary struct {
+	ST01   string      `json:"st01"`
+	ST02   string      `json:"st02"`
+	Status string      `json:"status"` // accepted or rejected
+	Errors []x12.Error `json:"errors,omitempty"`
+}
+
+// parseFile reads a file with the strict parser and prints a JSON summary. It
+// fails (exit 1) when the envelope or any set is rejected.
+func parseFile(args []string, out io.Writer) error {
+	if len(args) != 1 {
+		return usageError{"parse: expected one file"}
+	}
+	raw, err := os.ReadFile(args[0])
+	if err != nil {
+		return err
+	}
+	ic, err := x12.Parse(raw)
+	var env *x12.EnvelopeError
+	if errors.As(err, &env) {
+		if err := printJSON(out, parseSummary{Envelope: "rejected", Reason: env.Reason, Detail: env.Detail}); err != nil {
+			return err
+		}
+		return errors.New("the envelope is rejected")
+	}
+	if err != nil {
+		return err
+	}
+
+	sum := parseSummary{Envelope: "accepted", Sender: ic.SenderID(), Receiver: ic.ReceiverID(), ISA13: ic.ControlNumber()}
+	allAccepted := true
+	for _, g := range ic.Groups {
+		gs := groupSummary{GS01: g.GS.Value(1), GS06: g.GS.Value(6), Sets: []setSummary{}}
+		for _, s := range g.Sets {
+			set := setSummary{ST01: x12.Printable(s.ST.Value(1)), ST02: x12.Printable(s.ST.Value(2)), Status: "accepted", Errors: s.Errors}
+			if len(s.Errors) > 0 {
+				set.Status, allAccepted = "rejected", false
+			}
+			gs.Sets = append(gs.Sets, set)
+		}
+		sum.Groups = append(sum.Groups, gs)
+	}
+	if err := printJSON(out, sum); err != nil {
+		return err
+	}
+	if !allAccepted {
+		return errors.New("some sets are rejected")
+	}
+	return nil
+}
+
+func printJSON(out io.Writer, v any) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintln(out, string(b))
+	return nil
+}
+
+// send posts one interchange to /edi/inbound and prints the HTTP status and the
+// body of the answer (an MDN or an error). Only 200 is success.
+func send(ctx context.Context, args []string, out io.Writer) error {
+	fs := flag.NewFlagSet("send", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	url := fs.String("url", "", "")
+	token := fs.String("token", "", "")
+	from := fs.String("from", "", "")
+	to := fs.String("to", "", "")
+	file := fs.String("file", "", "")
+	messageID := fs.String("message-id", "", "")
+	if err := fs.Parse(args); err != nil || fs.NArg() != 0 || *url == "" || *token == "" || *from == "" || *to == "" || *file == "" {
+		return usageError{"send: --url, --token, --from, --to and --file are required"}
+	}
+	body, err := os.ReadFile(*file)
+	if err != nil {
+		return err
+	}
+	if *messageID == "" {
+		b := make([]byte, 12)
+		if _, err := rand.Read(b); err != nil {
+			return err
+		}
+		*messageID = "<" + hex.EncodeToString(b) + "@edigatectl>"
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, *url, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+*token)
+	req.Header.Set("Content-Type", "application/edi-x12")
+	req.Header.Set("Message-Id", *messageID)
+	req.Header.Set("AS2-From", *from)
+	req.Header.Set("AS2-To", *to)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	answer, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(out, "HTTP %d\n%s\n", resp.StatusCode, answer)
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("the server answered HTTP %d", resp.StatusCode)
+	}
+	return nil
 }
 
 // bearerTransport adds the Authorization header to every request.

@@ -1,15 +1,18 @@
-// Package edge is the gate in front of the MCP handler on /mcp.
+// Package edge is the gate in front of the gateway's two HTTP entrances: /mcp
+// for agents and /edi/inbound for partners (the second is in internal/inbound).
 //
-// Input: every HTTP request to /mcp. Output: either an error response in the
-// gateway's single format (internal/rpcerr) or the same request passed to the
-// next handler with the caller's identity attached.
+// Input: every HTTP request to either entrance. Output: either an error response
+// in the gateway's single format (internal/rpcerr) or the request passed on with
+// the caller's identity attached.
 //
-// Order of checks, all before the SDK sees the request:
-//  1. bucket per client address (spent only by failed token checks)
-//  2. bearer token -> principal (tenant and kind come only from the database)
-//  3. only kind "agent" may use /mcp
-//  4. bucket per principal
-//  5. body size, single JSON-RPC object, Mcp-Method / Mcp-Name against the body
+// Gate holds what both entrances share: the bucket per client address (spent
+// only by failed token checks), the bearer token -> principal step (tenant and
+// kind come only from the database) and the buckets per principal and per
+// partner. The /mcp handler (Gate.MCP) adds, in this order, all before the SDK
+// sees the request:
+//  1. only kind "agent" may use /mcp
+//  2. bucket per principal
+//  3. body size, single JSON-RPC object, Mcp-Method / Mcp-Name against the body
 //
 // Every request gets a trace id (header Edigate-Trace-Id). The identity reaches
 // tool handlers as the SDK's RequestExtra.TokenInfo; see Identity.
@@ -72,18 +75,96 @@ func IdentityFrom(ti *auth.TokenInfo) (Identity, bool) {
 
 type identityKey struct{}
 
-// Handler is the edge middleware.
-type Handler struct {
-	finder  PrincipalFinder
-	inner   http.Handler
-	log     *slog.Logger
-	byAddr  *buckets
-	byPrinc *buckets
+// Gate is the part of the edge that /mcp and /edi/inbound share.
+type Gate struct {
+	finder    PrincipalFinder
+	log       *slog.Logger
+	byAddr    *buckets // 5 failed token checks per second per address
+	byPrinc   *buckets // 20 requests per second per principal on /mcp
+	byPartner *buckets // 2 interchanges per second per partner on /edi/inbound
 }
 
-// New builds the edge around next. The sweep of old buckets stops when ctx ends.
-func New(ctx context.Context, finder PrincipalFinder, next http.Handler, log *slog.Logger) *Handler {
-	h := &Handler{finder: finder, log: log, byAddr: newBuckets(5, 5), byPrinc: newBuckets(20, 20)}
+// NewGate builds the gate. The sweep of old buckets stops when ctx ends.
+func NewGate(ctx context.Context, finder PrincipalFinder, log *slog.Logger) *Gate {
+	g := &Gate{finder: finder, log: log, byAddr: newBuckets(5, 5), byPrinc: newBuckets(20, 20), byPartner: newBuckets(2, 2)}
+	go func() {
+		t := time.NewTicker(sweepEvery)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				g.byAddr.sweep(bucketTTL)
+				g.byPrinc.sweep(bucketTTL)
+				g.byPartner.sweep(bucketTTL)
+			}
+		}
+	}()
+	return g
+}
+
+// Caller is an authenticated principal and the trace id of the request.
+type Caller struct {
+	Principal store.Principal
+	TraceID   string
+}
+
+// Authenticate runs the steps both entrances share: sets the trace id header,
+// checks the bucket of the client address and resolves the bearer token. On
+// failure it writes the error response and returns false.
+func (g *Gate) Authenticate(w http.ResponseWriter, r *http.Request) (Caller, bool) {
+	trace := newTraceID()
+	w.Header().Set(traceHeader, trace)
+
+	addrBucket := g.byAddr.get(clientAddr(r))
+	if addrBucket.Tokens() < 1 {
+		g.Reject(w, trace, "", rpcerr.RateLimited, nil)
+		return Caller{}, false
+	}
+	p, found, err := g.principalFor(r)
+	switch {
+	case err != nil:
+		g.log.Error("principal lookup failed", "trace_id", trace, "error", err.Error())
+		g.Reject(w, trace, "", rpcerr.Internal, nil)
+		return Caller{}, false
+	case !found:
+		addrBucket.Allow() // only a failed check spends the address bucket
+		g.Reject(w, trace, "", rpcerr.Unauthorized, nil)
+		return Caller{}, false
+	}
+	return Caller{Principal: p, TraceID: trace}, true
+}
+
+// AllowPartner takes one token from the bucket of a partner (2 interchanges per
+// second, burst 2) and reports whether there was one.
+func (g *Gate) AllowPartner(tenantID, partnerID string) bool {
+	return g.byPartner.get(tenantID + "|" + partnerID).Allow()
+}
+
+// Reject logs and writes an error in the gateway's single format.
+func (g *Gate) Reject(w http.ResponseWriter, trace, principal string, reason rpcerr.Reason, id json.RawMessage) {
+	g.log.Info("edge reject", "trace_id", trace, "principal_id", principal, "reason", string(reason))
+	if reason == rpcerr.Unauthorized {
+		w.Header().Set("WWW-Authenticate", "Bearer")
+	}
+	rpcerr.Write(w, reason, "", id)
+}
+
+// RejectTooLarge answers a body over the limit: HTTP 413 and schema_invalid.
+func (g *Gate) RejectTooLarge(w http.ResponseWriter, trace, principal string) {
+	g.log.Info("edge reject", "trace_id", trace, "principal_id", principal, "reason", string(rpcerr.SchemaInvalid))
+	rpcerr.WriteStatus(w, http.StatusRequestEntityTooLarge, rpcerr.New(rpcerr.SchemaInvalid, "request body too large"), nil)
+}
+
+// Handler is the /mcp middleware.
+type Handler struct {
+	gate  *Gate
+	inner http.Handler
+}
+
+// MCP wraps the SDK handler with the /mcp checks.
+func (g *Gate) MCP(next http.Handler) *Handler {
 	// The SDK reads identity through its own bearer middleware. Our edge has
 	// already checked the token, so this verifier only hands over what we stored.
 	verifier := func(ctx context.Context, _ string, _ *http.Request) (*auth.TokenInfo, error) {
@@ -93,50 +174,21 @@ func New(ctx context.Context, finder PrincipalFinder, next http.Handler, log *sl
 		}
 		return ti, nil
 	}
-	h.inner = auth.RequireBearerToken(verifier, &auth.RequireBearerTokenOptions{AllowMissingExpiration: true})(next)
-	go func() {
-		t := time.NewTicker(sweepEvery)
-		defer t.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-t.C:
-				h.byAddr.sweep(bucketTTL)
-				h.byPrinc.sweep(bucketTTL)
-			}
-		}
-	}()
-	return h
+	return &Handler{gate: g, inner: auth.RequireBearerToken(verifier, &auth.RequireBearerTokenOptions{AllowMissingExpiration: true})(next)}
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	trace := newTraceID()
-	w.Header().Set(traceHeader, trace)
-
-	addrBucket := h.byAddr.get(clientAddr(r))
-	if addrBucket.Tokens() < 1 {
-		h.reject(w, trace, "", rpcerr.RateLimited, nil)
+	c, ok := h.gate.Authenticate(w, r)
+	if !ok {
 		return
 	}
-
-	p, found, err := h.principalFor(r)
-	switch {
-	case err != nil:
-		h.log.Error("principal lookup failed", "trace_id", trace, "error", err.Error())
-		h.reject(w, trace, "", rpcerr.Internal, nil)
-		return
-	case !found:
-		addrBucket.Allow() // only a failed check spends the address bucket
-		h.reject(w, trace, "", rpcerr.Unauthorized, nil)
-		return
-	}
+	p, trace := c.Principal, c.TraceID
 	if p.Kind != "agent" {
-		h.reject(w, trace, p.ID, rpcerr.Forbidden, nil)
+		h.gate.Reject(w, trace, p.ID, rpcerr.Forbidden, nil)
 		return
 	}
-	if !h.byPrinc.get(p.ID).Allow() {
-		h.reject(w, trace, p.ID, rpcerr.RateLimited, nil)
+	if !h.gate.byPrinc.get(p.ID).Allow() {
+		h.gate.Reject(w, trace, p.ID, rpcerr.RateLimited, nil)
 		return
 	}
 
@@ -156,12 +208,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // principalFor resolves the Bearer token. found is false for a missing header,
 // a wrong format, an unknown hash and a revoked token; err only for database trouble.
-func (h *Handler) principalFor(r *http.Request) (p store.Principal, found bool, err error) {
+func (g *Gate) principalFor(r *http.Request) (p store.Principal, found bool, err error) {
 	fields := strings.Fields(r.Header.Get("Authorization"))
 	if len(fields) != 2 || !strings.EqualFold(fields[0], "Bearer") || !strings.HasPrefix(fields[1], store.TokenPrefix) {
 		return store.Principal{}, false, nil
 	}
-	p, err = h.finder.FindPrincipal(r.Context(), store.HashToken(fields[1]))
+	p, err = g.finder.FindPrincipal(r.Context(), store.HashToken(fields[1]))
 	if errors.Is(err, store.ErrNotFound) {
 		return store.Principal{}, false, nil
 	}
@@ -186,11 +238,10 @@ func (h *Handler) checkBody(w http.ResponseWriter, r *http.Request, trace, princ
 	if err != nil {
 		var tooBig *http.MaxBytesError
 		if errors.As(err, &tooBig) {
-			h.log.Info("edge reject", "trace_id", trace, "principal_id", principal, "reason", string(rpcerr.SchemaInvalid))
-			rpcerr.WriteStatus(w, http.StatusRequestEntityTooLarge, rpcerr.New(rpcerr.SchemaInvalid, "request body too large"), nil)
+			h.gate.RejectTooLarge(w, trace, principal)
 			return false
 		}
-		h.reject(w, trace, principal, rpcerr.SchemaInvalid, nil)
+		h.gate.Reject(w, trace, principal, rpcerr.SchemaInvalid, nil)
 		return false
 	}
 	r.Body = io.NopCloser(bytes.NewReader(body))
@@ -198,16 +249,16 @@ func (h *Handler) checkBody(w http.ResponseWriter, r *http.Request, trace, princ
 
 	trimmed := bytes.TrimSpace(body)
 	if len(trimmed) == 0 || trimmed[0] != '{' {
-		h.reject(w, trace, principal, rpcerr.SchemaInvalid, nil) // empty, batch or not an object
+		h.gate.Reject(w, trace, principal, rpcerr.SchemaInvalid, nil) // empty, batch or not an object
 		return false
 	}
 	var call rpcCall
 	if err := json.Unmarshal(trimmed, &call); err != nil {
-		h.reject(w, trace, principal, rpcerr.SchemaInvalid, nil)
+		h.gate.Reject(w, trace, principal, rpcerr.SchemaInvalid, nil)
 		return false
 	}
 	if msg := headerMismatch(r.Header, call); msg != "" {
-		h.log.Info("edge reject", "trace_id", trace, "principal_id", principal, "reason", string(rpcerr.SchemaInvalid), "code", -32020)
+		h.gate.log.Info("edge reject", "trace_id", trace, "principal_id", principal, "reason", string(rpcerr.SchemaInvalid), "code", -32020)
 		rpcerr.WriteStatus(w, http.StatusBadRequest, rpcerr.HeaderMismatch(msg), call.ID)
 		return false
 	}
@@ -238,14 +289,6 @@ func headerMismatch(h http.Header, call rpcCall) string {
 		}
 	}
 	return ""
-}
-
-func (h *Handler) reject(w http.ResponseWriter, trace, principal string, reason rpcerr.Reason, id json.RawMessage) {
-	h.log.Info("edge reject", "trace_id", trace, "principal_id", principal, "reason", string(reason))
-	if reason == rpcerr.Unauthorized {
-		w.Header().Set("WWW-Authenticate", "Bearer")
-	}
-	rpcerr.Write(w, reason, "", id)
 }
 
 func newTraceID() string {

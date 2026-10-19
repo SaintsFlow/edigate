@@ -44,7 +44,7 @@ type entry struct {
 var table = map[Reason]entry{
 	Unauthorized:         {-32001, http.StatusUnauthorized},
 	Forbidden:            {-32003, http.StatusForbidden},
-	NotFound:             {-32004, 0},
+	NotFound:             {-32016, 0}, // not -32004: the go-sdk reads that code as "server is closing"
 	SchemaInvalid:        {-32602, http.StatusBadRequest},
 	TaintedSink:          {-32010, 0},
 	PolicyDenied:         {-32011, 0},

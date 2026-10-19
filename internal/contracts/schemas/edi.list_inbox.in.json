@@ -3,7 +3,7 @@
   "type": "object",
   "additionalProperties": false,
   "properties": {
-    "status": { "enum": ["received", "processed", "rejected"] },
+    "status": { "enum": ["received", "processed"] },
     "limit": { "type": "integer", "minimum": 1, "maximum": 100 }
   }
 }

@@ -39,7 +39,7 @@ func TestListInboxEndToEnd(t *testing.T) {
 	st, pool := storetest.New(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	if err := st.AddTenant(ctx, "tenant-a", "Tenant A"); err != nil {
+	if err := st.AddTenant(ctx, "tenant-a", "Tenant A", ""); err != nil {
 		t.Fatal(err)
 	}
 	token, sum, err := store.NewToken()
@@ -54,7 +54,7 @@ func TestListInboxEndToEnd(t *testing.T) {
 	srv := mcpserver.New(st, log)
 	sdk := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return srv },
 		&mcp.StreamableHTTPOptions{Stateless: true, JSONResponse: true})
-	ts := httptest.NewServer(edge.New(ctx, st, sdk, log))
+	ts := httptest.NewServer(edge.NewGate(ctx, st, log).MCP(sdk))
 	defer ts.Close()
 
 	var trace string

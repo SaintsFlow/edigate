@@ -1,18 +1,28 @@
 #!/bin/sh
 # Smoke test of the running stand (started by `make smoke` / `make up`).
-# Creates a tenant and two tokens, then checks that an agent gets an empty
-# inbox, that bad requests get the right errors, and that the audit log has the
-# calls. Exits 0 only if every check matches. Safe to run again: principal ids
-# carry a random suffix.
+# Creates a tenant with an interchange id, an agent, an operator and a partner,
+# then checks: an agent gets an empty inbox; bad requests get the right errors;
+# the audit log has the calls; a partner can send an 850 and gets an MDN; the
+# agent reads that document without the partner's free text; the same
+# interchange again gives the same MDN and no new rows; the same ISA13 with
+# another body gives 409; a foreign AS2-From gives 403.
+# Exits 0 only if every check matches. Safe to run again: principal ids carry a
+# random suffix, ISA13 comes from the clock, and the EDI rows of the tenant
+# "smoke" (stand data only) are cleared at the start so that step a still sees
+# an empty inbox.
 set -eu
 
 BIN=bin
 URL=http://127.0.0.1:18080/mcp
+INBOUND=http://127.0.0.1:18080/edi/inbound
 export EDIGATE_DB_URL='postgres://edigate:edigate@127.0.0.1:55432/edigate?sslmode=disable'
 COMPOSE="docker compose -f deploy/compose/docker-compose.yml"
 SUFFIX=$(date +%s)$$
 AGENT_ID="smoke-agent-$SUFFIX"
 OPERATOR_ID="smoke-operator-$SUFFIX"
+PARTNER_ID="smoke-partner-$SUFFIX"
+GATEWAY=ZZ:ZZTESTSUPPL
+BUYER=ZZ:ZZTESTBUYER
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
@@ -24,6 +34,13 @@ expect() {
 	*"$3"*) echo "ok: $1" ;;
 	*) fail "$1: expected '$3' in: $2" ;;
 	esac
+}
+
+# sql <statement>...: runs statements in the stand's database, prints the plain result.
+sql() {
+	for statement in "$@"; do
+		$COMPOSE exec -T postgres psql -U edigate -d edigate -v ON_ERROR_STOP=1 -Atq -c "$statement"
+	done
 }
 
 # post <token or empty> <outfile> [extra curl args...]: prints the HTTP status.
@@ -39,11 +56,33 @@ post() {
 		"$@" --data "$CALL_BODY"
 }
 
+# edi850 <file> <ISA13> <order number>: writes an 850 of the smoke partner. The
+# PID05 text is what the agent must never see.
+PID_TEXT="SMOKE SECRET WIDGET TEXT"
+edi850() {
+	{
+		printf 'ISA*00*          *00*          *ZZ*ZZTESTBUYER    *ZZ*ZZTESTSUPPL    *261018*1200*U*00401*%s*0*T*>~' "$2"
+		printf 'GS*PO*ZZTESTBUYER*ZZTESTSUPPL*20261018*1200*1*X*004010~ST*850*0001~BEG*00*SA*%s**20261018~' "$3"
+		printf 'N1*BY*TEST BUYER*92*B001~N1*ST*TEST SHIP-TO*92*DC01~PO1*1*10*EA*5.25**UP*012345678905~'
+		printf 'PID*F****%s~CTT*1~SE*8*0001~GE*1*1~IEA*1*%s~' "$PID_TEXT" "$2"
+	} >"$1"
+}
+
+# send <file> [from]: posts the file as the smoke partner; prints "HTTP <code>" and the body.
+send() {
+	"$BIN/edigatectl" send --url "$INBOUND" --token "$PARTNER_TOKEN" --from "${2:-$BUYER}" --to "$GATEWAY" --file "$1"
+}
+
 CALL_BODY='{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"edi.list_inbox","arguments":{}}}'
 
-"$BIN/edigatectl" tenant add smoke "Smoke tenant" >/dev/null
+sql "DELETE FROM edi_documents WHERE tenant_id = 'smoke'" "DELETE FROM edi_interchanges WHERE tenant_id = 'smoke'" \
+	"DELETE FROM edi_rejected WHERE tenant_id = 'smoke'" >/dev/null
+
+"$BIN/edigatectl" tenant add smoke "Smoke tenant" --interchange-id "$GATEWAY" >/dev/null
+"$BIN/edigatectl" partner add --tenant smoke --partner "$BUYER" --role customer --name "Smoke buyer" >/dev/null
 AGENT_TOKEN=$("$BIN/edigatectl" token issue --tenant smoke --kind agent --id "$AGENT_ID")
 OPERATOR_TOKEN=$("$BIN/edigatectl" token issue --tenant smoke --kind operator --id "$OPERATOR_ID")
+PARTNER_TOKEN=$("$BIN/edigatectl" token issue --tenant smoke --kind partner --id "$PARTNER_ID" --partner "$BUYER")
 
 # (a) the agent gets an empty inbox
 out=$("$BIN/edigatectl" call --url "$URL" --token "$AGENT_TOKEN" edi.list_inbox '{}')
@@ -72,9 +111,59 @@ out=$("$BIN/edigatectl" call --url "$URL" --token "$AGENT_TOKEN" edi.list_inbox 
 expect "e schema_invalid" "$out" '"reason":"schema_invalid"'
 
 # (f) audit rows of this run
-rows=$($COMPOSE exec -T postgres psql -U edigate -d edigate -Atc \
-	"SELECT outcome FROM audit_log WHERE tenant_id = 'smoke' AND principal_id = '$AGENT_ID' AND event_type = 'tool_call' ORDER BY seq")
+rows=$(sql "SELECT outcome FROM audit_log WHERE tenant_id = 'smoke' AND principal_id = '$AGENT_ID' AND event_type = 'tool_call' ORDER BY seq")
 expect "f audit ok" "$rows" "ok"
 expect "f audit schema_invalid" "$rows" "schema_invalid"
+
+# (g) the partner sends an 850 with a new ISA13: 200 and an MDN that says processed
+ISA13=$(printf '%09d' $(($(date +%s) % 1000000000)))
+ORDER="SMK$ISA13"
+edi850 "$TMP/first.edi" "$ISA13" "$ORDER"
+first=$(send "$TMP/first.edi") || fail "g: send failed: $first"
+expect "g HTTP 200" "$first" "HTTP 200"
+expect "g MDN processed" "$first" '"disposition":"processed"}'
+
+# (h) the agent lists the document and reads typed fields; the PID05 text never appears
+out=$("$BIN/edigatectl" call --url "$URL" --token "$AGENT_TOKEN" edi.list_inbox '{}')
+expect "h inbox shows the order" "$out" "\"business_ref\":\"$ORDER\""
+DOC_ID=$(printf '%s' "$out" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+[ -n "$DOC_ID" ] || fail "h: no document id in: $out"
+doc=$("$BIN/edigatectl" call --url "$URL" --token "$AGENT_TOKEN" edi.read_document "{\"document_id\":\"$DOC_ID\"}")
+expect "h business_ref" "$doc" "\"business_ref\":\"$ORDER\""
+expect "h lines" "$doc" '"line_no":"1"'
+case "$doc" in
+*"$PID_TEXT"*) fail "h: the PID05 text reached the agent: $doc" ;;
+*) echo "ok: h no free text in the answer" ;;
+esac
+case "$doc$out" in
+*WIDGET*) fail "h: part of the PID05 text reached the agent" ;;
+esac
+
+# (i) the same interchange again: 200, the same MDN byte for byte, one row
+sleep 1
+again=$(send "$TMP/first.edi") || fail "i: send failed: $again"
+[ "$again" = "$first" ] || fail "i: the MDN differs: $first / $again"
+echo "ok: i same MDN"
+n=$(sql "SELECT count(*) FROM edi_interchanges WHERE tenant_id = 'smoke' AND isa13 = '$ISA13'")
+[ "$n" = 1 ] || fail "i: expected one interchange row, got $n"
+echo "ok: i one row"
+
+# (j) the same ISA13 with another body: 409
+sleep 1
+edi850 "$TMP/other.edi" "$ISA13" "SMKOTHER"
+rc=0
+out=$(send "$TMP/other.edi") || rc=$?
+[ "$rc" = 1 ] || fail "j: expected exit code 1, got $rc"
+expect "j HTTP 409" "$out" "HTTP 409"
+n=$(sql "SELECT count(*) FROM edi_rejected WHERE tenant_id = 'smoke' AND reason = 'isa13_conflict'")
+[ "$n" = 1 ] || fail "j: expected one conflict row, got $n"
+
+# (k) a partner token with the AS2-From of another partner: 403
+sleep 1
+rc=0
+out=$(send "$TMP/first.edi" ZZ:ZZTESTOTHER) || rc=$?
+[ "$rc" = 1 ] || fail "k: expected exit code 1, got $rc"
+expect "k HTTP 403" "$out" "HTTP 403"
+expect "k forbidden" "$out" '"reason":"forbidden"'
 
 echo "smoke ok"

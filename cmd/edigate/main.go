@@ -1,6 +1,6 @@
 // Command edigate runs the gateway: config -> database pool -> migrations ->
-// edge + MCP server -> HTTP server (/mcp, /healthz). It stops gracefully on
-// SIGINT or SIGTERM.
+// edge + MCP server and the partner entrance -> HTTP server (/mcp,
+// /edi/inbound, /healthz). It stops gracefully on SIGINT or SIGTERM.
 //
 // "edigate healthcheck" is the container healthcheck (the distroless image has
 // no curl): it calls /healthz on the local listen port and exits 0 or 1.
@@ -23,6 +23,7 @@ import (
 
 	"github.com/SaintsFlow/edigate/internal/config"
 	"github.com/SaintsFlow/edigate/internal/edge"
+	"github.com/SaintsFlow/edigate/internal/inbound"
 	"github.com/SaintsFlow/edigate/internal/mcpserver"
 	"github.com/SaintsFlow/edigate/internal/store"
 )
@@ -62,8 +63,11 @@ func run() error {
 	sdk := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return mcpServer },
 		&mcp.StreamableHTTPOptions{Stateless: true, JSONResponse: true})
 
+	// One gate for both entrances: they share the bucket per client address.
+	gate := edge.NewGate(ctx, st, log)
 	mux := http.NewServeMux()
-	mux.Handle("/mcp", edge.New(ctx, st, sdk, log))
+	mux.Handle("/mcp", gate.MCP(sdk))
+	mux.Handle("/edi/inbound", inbound.New(gate, st, log))
 	mux.HandleFunc("GET /healthz", healthz(st))
 
 	srv := &http.Server{Addr: cfg.Listen, Handler: mux, ReadHeaderTimeout: 10 * time.Second}

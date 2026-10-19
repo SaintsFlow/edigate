@@ -1,7 +1,7 @@
 COMPOSE = docker compose -f deploy/compose/docker-compose.yml
 TEST_DB = postgres://edigate:edigate@127.0.0.1:55432/edigate?sslmode=disable
 
-.PHONY: build up down test smoke
+.PHONY: build up down test fuzz smoke
 
 build:
 	go build -o bin/ ./cmd/...
@@ -19,6 +19,11 @@ test:
 	go vet ./...
 	EDIGATE_TEST_DB_URL='$(TEST_DB)' go test -race -count=1 -v ./...
 	go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+
+# Fuzzes the X12 parser for 60 seconds. A failing input is saved under
+# internal/edi/x12/testdata/fuzz and becomes a regression test.
+fuzz:
+	go test -run '^$$' -fuzz FuzzParse -fuzztime 60s ./internal/edi/x12
 
 smoke: build up
 	sh scripts/smoke.sh

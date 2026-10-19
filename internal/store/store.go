@@ -99,10 +99,14 @@ func (s *Store) CheckMigrated(ctx context.Context) error {
 	return nil
 }
 
-// AddTenant creates a tenant; an existing id is left as it is.
-func (s *Store) AddTenant(ctx context.Context, id, name string) error {
+// AddTenant creates a tenant. interchangeID is the gateway's ISA07:ISA08 for
+// this tenant ("" for none). For an existing tenant the name stays and the
+// interchange id is set only when one is given.
+func (s *Store) AddTenant(ctx context.Context, id, name, interchangeID string) error {
 	_, err := s.pool.Exec(ctx,
-		`INSERT INTO tenants (id, name) VALUES ($1, $2) ON CONFLICT (id) DO NOTHING`, id, name)
+		`INSERT INTO tenants (id, name, interchange_id) VALUES ($1, $2, NULLIF($3, ''))
+		 ON CONFLICT (id) DO UPDATE SET interchange_id = COALESCE(EXCLUDED.interchange_id, tenants.interchange_id)`,
+		id, name, interchangeID)
 	return err
 }
 

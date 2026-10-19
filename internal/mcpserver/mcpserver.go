@@ -22,7 +22,10 @@ import (
 	"github.com/SaintsFlow/edigate/internal/tools"
 )
 
-const listInbox = "edi.list_inbox"
+const (
+	listInbox    = "edi.list_inbox"
+	readDocument = "edi.read_document"
+)
 
 type server struct {
 	store *store.Store
@@ -46,7 +49,15 @@ func New(st *store.Store, log *slog.Logger) *mcp.Server {
 					return nil, rpcerr.New(rpcerr.SchemaInvalid, "")
 				}
 			}
-			return tools.ListInbox(ctx, tenantID, in)
+			return tools.ListInbox(ctx, st, tenantID, in)
+		})
+	s.add(srv, readDocument, "Read one inbox document: typed header and lines, no free text.",
+		func(ctx context.Context, tenantID string, args json.RawMessage) (any, error) {
+			var in tools.ReadDocumentInput
+			if err := json.Unmarshal(args, &in); err != nil {
+				return nil, rpcerr.New(rpcerr.SchemaInvalid, "")
+			}
+			return tools.ReadDocument(ctx, st, tenantID, in)
 		})
 	return srv
 }

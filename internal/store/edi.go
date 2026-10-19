@@ -1,0 +1,222 @@
+package store
+
+import (
+	"bytes"
+	"context"
+	"fmt"
+	"time"
+
+	"github.com/jackc/pgx/v5/pgconn"
+)
+
+// Partner is a trading partner of a tenant. Role is "customer" (sends 850) or
+// "supplier" (sends 810). The amount limits are filled and used from wave 2-6.
+type Partner struct {
+	TenantID  string
+	PartnerID string // ISA05:ISA06, for example ZZ:ZZTESTBUYER
+	Role      string
+	Name      string
+}
+
+// AddPartner registers a partner, or updates the role and name of a known one.
+func (s *Store) AddPartner(ctx context.Context, p Partner) error {
+	_, err := s.pool.Exec(ctx,
+		`INSERT INTO partners (tenant_id, partner_id, role, name) VALUES ($1, $2, $3, $4)
+		 ON CONFLICT (tenant_id, partner_id) DO UPDATE SET role = EXCLUDED.role, name = EXCLUDED.name`,
+		p.TenantID, p.PartnerID, p.Role, p.Name)
+	return err
+}
+
+// PartnerAccess is what /edi/inbound needs to know about a partner token.
+type PartnerAccess struct {
+	Role      string
+	Active    bool
+	GatewayID string // ISA07:ISA08 of the tenant; empty when the tenant has none
+}
+
+// PartnerAccess reads the partner and the tenant's interchange id. ErrNotFound
+// when the partner is not registered for the tenant.
+func (s *Store) PartnerAccess(ctx context.Context, tenantID, partnerID string) (PartnerAccess, error) {
+	var a PartnerAccess
+	err := s.pool.QueryRow(ctx,
+		`SELECT p.role, p.active, COALESCE(t.interchange_id, '')
+		 FROM partners p JOIN tenants t ON t.id = p.tenant_id
+		 WHERE p.tenant_id = $1 AND p.partner_id = $2`, tenantID, partnerID).
+		Scan(&a.Role, &a.Active, &a.GatewayID)
+	if isNoRows(err) {
+		return PartnerAccess{}, ErrNotFound
+	}
+	return a, err
+}
+
+// InboundDocument is one transaction set of an interchange to store.
+type InboundDocument struct {
+	GS06        string
+	ST01        string
+	ST02        string
+	BusinessRef string // "" is stored as NULL
+	Body        []byte // JSON; nil is stored as NULL
+	Status      string // received or rejected
+	Errors      []byte // JSON array; nil is stored as NULL
+}
+
+// InboundInterchange is a parsed interchange from a partner, ready to store.
+type InboundInterchange struct {
+	TenantID  string
+	PartnerID string
+	ISA13     string
+	MessageID string
+	Raw       []byte
+	SHA256    []byte // of Raw; also stored as the MIC
+	MDN       []byte // JSON of the MDN sent for a new interchange
+	Documents []InboundDocument
+}
+
+// Outcomes of SaveInbound.
+const (
+	SavedNew       = "ok"
+	SavedDuplicate = "duplicate"
+	SavedConflict  = "isa13_conflict"
+)
+
+// SaveResult tells what SaveInbound did. MDN is the one stored with the first
+// copy of a duplicate interchange.
+type SaveResult struct {
+	Outcome string
+	MDN     []byte
+}
+
+// SaveInbound stores an interchange and its documents in one transaction. The
+// unique index on (tenant, direction, partner, ISA13) decides a race between two
+// identical requests: the second one waits for the first and then reads its row.
+// Same ISA13 and same SHA-256: duplicate, nothing is written, the stored MDN is
+// returned. Same ISA13 and another body: the body goes to edi_rejected and
+// nothing else is written.
+func (s *Store) SaveInbound(ctx context.Context, in InboundInterchange) (SaveResult, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return SaveResult{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var id string
+	err = tx.QueryRow(ctx,
+		`INSERT INTO edi_interchanges
+		   (tenant_id, direction, counterparty_id, isa13, message_id, raw, raw_sha256, mic_sha256, mdn)
+		 VALUES ($1, 'in', $2, $3, $4, $5, $6, $6, $7)
+		 ON CONFLICT (tenant_id, direction, counterparty_id, isa13) DO NOTHING
+		 RETURNING id::text`,
+		in.TenantID, in.PartnerID, in.ISA13, in.MessageID, in.Raw, in.SHA256, in.MDN).Scan(&id)
+
+	if isNoRows(err) {
+		var sum, mdn []byte
+		err = tx.QueryRow(ctx,
+			`SELECT raw_sha256, mdn FROM edi_interchanges
+			 WHERE tenant_id = $1 AND direction = 'in' AND counterparty_id = $2 AND isa13 = $3`,
+			in.TenantID, in.PartnerID, in.ISA13).Scan(&sum, &mdn)
+		if err != nil {
+			return SaveResult{}, fmt.Errorf("read the first copy of the interchange: %w", err)
+		}
+		if bytes.Equal(sum, in.SHA256) {
+			return SaveResult{Outcome: SavedDuplicate, MDN: mdn}, nil
+		}
+		if err := insertRejected(ctx, tx, in.TenantID, in.PartnerID, in.ISA13, in.Raw, in.SHA256, "isa13_conflict", ""); err != nil {
+			return SaveResult{}, err
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return SaveResult{}, err
+		}
+		return SaveResult{Outcome: SavedConflict}, nil
+	}
+	if err != nil {
+		return SaveResult{}, err
+	}
+
+	for _, d := range in.Documents {
+		_, err = tx.Exec(ctx,
+			`INSERT INTO edi_documents
+			   (interchange_id, tenant_id, partner_id, gs06, st01, st02, business_ref, body, status, errors)
+			 VALUES ($1::uuid, $2, $3, $4, $5, $6, NULLIF($7, ''), $8, $9, $10)`,
+			id, in.TenantID, in.PartnerID, d.GS06, d.ST01, d.ST02, d.BusinessRef, d.Body, d.Status, d.Errors)
+		if err != nil {
+			return SaveResult{}, fmt.Errorf("store document: %w", err)
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return SaveResult{}, err
+	}
+	return SaveResult{Outcome: SavedNew}, nil
+}
+
+// SaveRejected stores an interchange that was refused as a whole (envelope
+// error). isa13 is "" when it could not be read.
+func (s *Store) SaveRejected(ctx context.Context, tenantID, partnerID, isa13 string, raw, sha []byte, detail string) error {
+	return insertRejected(ctx, s.pool, tenantID, partnerID, isa13, raw, sha, "envelope_error", detail)
+}
+
+// execer is the part of a pool and of a transaction that insertRejected needs.
+type execer interface {
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+}
+
+func insertRejected(ctx context.Context, db execer, tenantID, partnerID, isa13 string, raw, sha []byte, reason, detail string) error {
+	_, err := db.Exec(ctx,
+		`INSERT INTO edi_rejected (tenant_id, partner_id, isa13, raw, raw_sha256, reason, detail)
+		 VALUES ($1, $2, NULLIF($3, ''), $4, $5, $6, NULLIF($7, ''))`,
+		tenantID, partnerID, isa13, raw, sha, reason, detail)
+	return err
+}
+
+// Document is a stored document as the read tools see it.
+type Document struct {
+	ID          string
+	ST01        string
+	PartnerID   string
+	BusinessRef string
+	Status      string
+	Body        []byte // JSON
+	CreatedAt   time.Time
+}
+
+// agentVisible limits every agent query to the sets the agent may see: 850 and
+// 810 that were accepted. 997 and rejected sets are never shown.
+const agentVisible = `st01 IN ('850', '810') AND status IN ('received', 'processed')`
+
+// ListInbox returns the visible documents of one tenant, newest first. status
+// "" means both visible statuses.
+func (s *Store) ListInbox(ctx context.Context, tenantID, status string, limit int) ([]Document, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT id::text, st01, partner_id, COALESCE(business_ref, ''), status, created_at
+		 FROM edi_documents
+		 WHERE tenant_id = $1 AND `+agentVisible+` AND ($2::text = '' OR status = $2::text)
+		 ORDER BY created_at DESC, id
+		 LIMIT $3`, tenantID, status, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	docs := []Document{}
+	for rows.Next() {
+		var d Document
+		if err := rows.Scan(&d.ID, &d.ST01, &d.PartnerID, &d.BusinessRef, &d.Status, &d.CreatedAt); err != nil {
+			return nil, err
+		}
+		docs = append(docs, d)
+	}
+	return docs, rows.Err()
+}
+
+// ReadDocument returns one visible document of the tenant. A document of
+// another tenant, a 997, a rejected set and an unknown id all give ErrNotFound.
+func (s *Store) ReadDocument(ctx context.Context, tenantID, id string) (Document, error) {
+	var d Document
+	err := s.pool.QueryRow(ctx,
+		`SELECT id::text, st01, partner_id, COALESCE(business_ref, ''), status, body, created_at
+		 FROM edi_documents
+		 WHERE tenant_id = $1 AND id = $2::uuid AND `+agentVisible+` AND body IS NOT NULL`, tenantID, id).
+		Scan(&d.ID, &d.ST01, &d.PartnerID, &d.BusinessRef, &d.Status, &d.Body, &d.CreatedAt)
+	if isNoRows(err) {
+		return Document{}, ErrNotFound
+	}
+	return d, err
+}

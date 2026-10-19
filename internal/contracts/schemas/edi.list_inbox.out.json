@@ -12,11 +12,11 @@
         "required": ["id", "st01", "partner_id", "business_ref", "received_at", "status"],
         "properties": {
           "id": { "type": "string" },
-          "st01": { "type": "string" },
+          "st01": { "enum": ["850", "810"] },
           "partner_id": { "type": "string" },
           "business_ref": { "type": "string" },
           "received_at": { "type": "string" },
-          "status": { "enum": ["received", "processed", "rejected"] }
+          "status": { "enum": ["received", "processed"] }
         }
       }
     }
