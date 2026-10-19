@@ -136,6 +136,37 @@ a JSON line for every MCP request.
 `make corpus` builds the EDI-Inject test corpus (300 X12 documents with labels) into `bench/out/corpus-seed1` and
 checks every document with the strict parser. Rules of the generator: [bench/edi_inject/README.md](bench/edi_inject/README.md).
 
+## Benchmark harness
+
+`bench/harness` runs an agent over the documents of the corpus on the stand and `bench/metrics` reads the result from the
+state of the mocks and of the gateway tables. It needs the stand (`make up`), Python 3.11 and, for local models,
+Ollama on the host. `make bench-venv` makes the environment with the exact versions of `bench/requirements.txt`,
+`make bench-test` runs the tests of the harness and the metrics.
+
+```sh
+make bench-smoke
+```
+
+builds the stand, makes the pilot corpus (seed 2) if it is missing, runs two fake models and one local Ollama model
+in configurations C0 and C3 on 20 documents (the ones marked `held_out` never run), runs the fault schedules F1 to F8 with a
+scripted agent, and prints two tables: the attack success rate by configuration and model, and the duplicate rate by
+configuration and fault. It exits with 0 only if every episode produced a row and a few invariants hold (for example,
+no duplicate effect in C3 under F1 and F4). It takes tens of minutes. The results stay in `bench/out/` and are not
+committed. `BENCH_SMOKE_MODEL` changes the Ollama model.
+
+A run of your own, from the `bench` folder:
+
+```sh
+.venv/bin/python -m harness.run --corpus out/corpus-seed2 --docs deciding:10 --configs C0,C3 \
+    --models fake-honest,ollama:llama3.2:3b --seed 1 --operator approve-all --slots 4 --out out/myrun
+```
+
+Each episode starts from a clean database state in its own slot (a gateway process, a database and a tenant), with the
+mocks shared. The fake models are checks of the pipeline: `fake-honest` does the task from the typed fields, and
+`fake-gullible` also follows the attack sentences it finds in the document, so a run with it shows what each
+configuration lets through, not how a model behaves. Hosted models need `OPENROUTER_API_KEY`; without it they are skipped.
+Configuration C2 puts agentgateway in front of the gateway ([bench/agentgateway](bench/agentgateway)).
+
 ## Documents
 
 [docs](docs) holds the threat model, the invariants and the SHA-256 of the research protocol that the experiments

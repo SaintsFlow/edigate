@@ -12,7 +12,9 @@
 //
 // Fault knobs (set from the environment by cmd, or by tests): the share of
 // requests that commit the order and then answer 500; a fixed delay; a prefix of
-// the business reference that gets a permanent refusal (422).
+// the business reference that gets a permanent refusal (422). POST /control sets
+// the same three knobs for one tenant (package mocks/control), so that slots of
+// the benchmark do not disturb each other.
 package server
 
 import (
@@ -28,6 +30,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/SaintsFlow/edigate/mocks/control"
 )
 
 const schemaSQL = `
@@ -77,10 +81,13 @@ type Server struct {
 	pool *pgxpool.Pool
 	mu   sync.Mutex // guards cfg: tests change the knobs while the server runs
 	cfg  Config
+	ctl  *control.Store // knobs per tenant (POST /control), over cfg
 }
 
 // New builds the server on a pool whose database has the mock schema (see Migrate).
-func New(pool *pgxpool.Pool, cfg Config) *Server { return &Server{pool: pool, cfg: cfg} }
+func New(pool *pgxpool.Pool, cfg Config) *Server {
+	return &Server{pool: pool, cfg: cfg, ctl: control.New(false)}
+}
 
 // SetFailAfterCommitRate changes the share of requests that commit and then fail.
 func (s *Server) SetFailAfterCommitRate(rate float64) {
@@ -109,6 +116,16 @@ func (s *Server) config() Config {
 	return s.cfg
 }
 
+// forTenant puts the knobs set for one tenant (POST /control) over the process-wide config.
+// Cancel has no tenant in its request, so it uses the process-wide config only.
+func (s *Server) forTenant(cfg Config, tenant string) Config {
+	k := s.ctl.Get(tenant)
+	cfg.FailAfterCommitRate = k.Rate(cfg.FailAfterCommitRate)
+	cfg.Latency = k.Latency(cfg.Latency)
+	cfg.RejectRefPrefix = k.Prefix(cfg.RejectRefPrefix)
+	return cfg
+}
+
 // Handler returns the routes of the mock.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
@@ -117,6 +134,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /hs/orders/{external_id}/cancel", s.cancel)
 	mux.HandleFunc("POST /hs/vendor-invoices", s.createInvoice)
 	mux.HandleFunc("GET /hs/vendor-invoices", s.lookupInvoice)
+	s.ctl.Register(mux)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		if err := s.pool.Ping(r.Context()); err != nil {
 			reply(w, http.StatusServiceUnavailable, map[string]string{"error": "database unavailable"})
@@ -153,18 +171,18 @@ func (o orderIn) valid() bool {
 }
 
 func (s *Server) create(w http.ResponseWriter, r *http.Request) {
-	cfg := s.config()
+	var in orderIn
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&in); err != nil || !in.valid() {
+		reply(w, http.StatusBadRequest, map[string]string{"error": "bad order"})
+		return
+	}
+	cfg := s.forTenant(s.config(), in.TenantID)
 	if cfg.Latency > 0 {
 		select {
 		case <-time.After(cfg.Latency):
 		case <-r.Context().Done():
 			return
 		}
-	}
-	var in orderIn
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&in); err != nil || !in.valid() {
-		reply(w, http.StatusBadRequest, map[string]string{"error": "bad order"})
-		return
 	}
 	if cfg.RejectRefPrefix != "" && strings.HasPrefix(in.BusinessRef, cfg.RejectRefPrefix) {
 		reply(w, http.StatusUnprocessableEntity, map[string]string{"error": "order refused"})

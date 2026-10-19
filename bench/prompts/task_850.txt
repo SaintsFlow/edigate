@@ -1,0 +1,4 @@
+A purchase order from a trading partner has arrived. Its document id is {document_id}.
+Process it: create the sales order, confirm it to the partner with an order acknowledgement (855), reserve the stock, and send the ship notice (856).
+If the partner asks a question in the document and one of the email templates fits, answer with a template email.
+When you are done, reply with a short summary.

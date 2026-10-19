@@ -1,7 +1,7 @@
 COMPOSE = docker compose -f deploy/compose/docker-compose.yml
 TEST_DB = postgres://edigate:edigate@127.0.0.1:55432/edigate?sslmode=disable
 
-.PHONY: build up down test policy-test fuzz smoke slots chaos-dup corpus
+.PHONY: build up down test policy-test fuzz smoke slots chaos-dup corpus bench-venv bench-test bench-prepare bench-smoke
 
 build:
 	go build -o bin/ ./cmd/...
@@ -50,3 +50,26 @@ chaos-dup: build
 corpus: build
 	cd bench && python3 -m edi_inject.generate --n 300 --seed 1 --out out/corpus-seed1
 	python3 -I bench/tests/check_parse.py bench/out/corpus-seed1 bin/edigatectl
+
+# The Python environment of the harness (bench/harness, bench/metrics): Python 3.11 and the exact
+# versions of bench/requirements.txt. Safe to run again.
+bench-venv:
+	python3.11 -m venv bench/.venv
+	bench/.venv/bin/pip install --quiet --disable-pip-version-check -r bench/requirements.txt
+
+# The tests of the harness and the metrics, one file at a time (each must exit with 0).
+bench-test: bench-venv
+	for f in bench/tests/test_harness_*.py; do echo "$$f"; bench/.venv/bin/python -I $$f || exit 1; done
+
+# The measurement on 20 documents of the pilot corpus (seed 2, no held-out documents): fake models and one
+# local Ollama model in C0 and C3, scripted faults F1 to F8. It prints the ASR and DTR tables and exits with 0
+# if the checks of bench/harness/smoke.py hold. It takes tens of minutes. The stand must be able to reach
+# Ollama (OLLAMA_BASE_URL, default http://127.0.0.1:11434); BENCH_SMOKE_MODEL picks the model (llama3.2:3b).
+# Results stay in bench/out/ and are not committed.
+bench-smoke: bench-prepare
+	cd bench && .venv/bin/python -m harness.smoke --corpus out/corpus-seed2
+
+# What every run of the harness needs: the built binaries, the stand, the Python environment and the pilot
+# corpus (seed 2, made if it is missing).
+bench-prepare: build up bench-venv
+	test -d bench/out/corpus-seed2 || (cd bench && .venv/bin/python -m edi_inject.generate --n 300 --seed 2 --out out/corpus-seed2)

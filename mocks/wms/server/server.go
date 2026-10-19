@@ -39,6 +39,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/SaintsFlow/edigate/internal/decimal"
+	"github.com/SaintsFlow/edigate/mocks/control"
 )
 
 const schemaSQL = `
@@ -83,10 +84,13 @@ type Server struct {
 	pool *pgxpool.Pool
 	mu   sync.Mutex // guards cfg: tests change the knobs while the server runs
 	cfg  Config
+	ctl  *control.Store // knobs per tenant (POST /control), over cfg
 }
 
 // New builds the server on a pool whose database has the mock schema (see Migrate).
-func New(pool *pgxpool.Pool, cfg Config) *Server { return &Server{pool: pool, cfg: cfg} }
+func New(pool *pgxpool.Pool, cfg Config) *Server {
+	return &Server{pool: pool, cfg: cfg, ctl: control.New(true)}
+}
 
 // SetRejectRefPrefix changes the prefix of business references whose shipment gets a 422.
 func (s *Server) SetRejectRefPrefix(prefix string) {
@@ -116,6 +120,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /reservations/{external_id}/release", s.release)
 	mux.HandleFunc("POST /shipments", s.ship)
 	mux.HandleFunc("GET /shipments", s.lookupShipment)
+	s.ctl.Register(mux)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		if err := s.pool.Ping(r.Context()); err != nil {
 			reply(w, http.StatusServiceUnavailable, map[string]string{"error": "database unavailable"})
@@ -156,27 +161,39 @@ func (q request) valid() bool {
 	return true
 }
 
-// begin applies the delay and reads the body. It writes the answer and returns false when
-// the request is not usable.
-func (s *Server) begin(w http.ResponseWriter, r *http.Request, cfg Config) (request, bool) {
+// begin reads the body, then applies the delay of the tenant. It returns the config in force for
+// that tenant (the knobs of POST /control over the process-wide ones). It writes the answer and
+// returns false when the request is not usable.
+func (s *Server) begin(w http.ResponseWriter, r *http.Request) (request, Config, bool) {
+	var in request
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&in); err != nil || !in.valid() {
+		reply(w, http.StatusBadRequest, map[string]string{"error": "bad request"})
+		return request{}, Config{}, false
+	}
+	cfg := s.forTenant(s.config(), in.TenantID)
 	if cfg.Latency > 0 {
 		select {
 		case <-time.After(cfg.Latency):
 		case <-r.Context().Done():
-			return request{}, false
+			return request{}, Config{}, false
 		}
 	}
-	var in request
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&in); err != nil || !in.valid() {
-		reply(w, http.StatusBadRequest, map[string]string{"error": "bad request"})
-		return request{}, false
-	}
-	return in, true
+	return in, cfg, true
+}
+
+// forTenant puts the knobs set for one tenant over the process-wide config. Release has no tenant
+// in its request and uses the process-wide config only.
+func (s *Server) forTenant(cfg Config, tenant string) Config {
+	k := s.ctl.Get(tenant)
+	cfg.FailAfterCommitRate = k.Rate(cfg.FailAfterCommitRate)
+	cfg.Latency = k.Latency(cfg.Latency)
+	cfg.RejectRefPrefix = k.Prefix(cfg.RejectRefPrefix)
+	cfg.ShipQtyFactor = k.Factor(cfg.ShipQtyFactor)
+	return cfg
 }
 
 func (s *Server) reserve(w http.ResponseWriter, r *http.Request) {
-	cfg := s.config()
-	in, ok := s.begin(w, r, cfg)
+	in, cfg, ok := s.begin(w, r)
 	if !ok {
 		return
 	}
@@ -190,8 +207,7 @@ func (s *Server) reserve(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) ship(w http.ResponseWriter, r *http.Request) {
-	cfg := s.config()
-	in, ok := s.begin(w, r, cfg)
+	in, cfg, ok := s.begin(w, r)
 	if !ok {
 		return
 	}

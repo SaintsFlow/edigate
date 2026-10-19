@@ -39,18 +39,18 @@ func (i invoiceIn) valid() bool {
 }
 
 func (s *Server) createInvoice(w http.ResponseWriter, r *http.Request) {
-	cfg := s.config()
+	var in invoiceIn
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&in); err != nil || !in.valid() {
+		reply(w, http.StatusBadRequest, map[string]string{"error": "bad invoice"})
+		return
+	}
+	cfg := s.forTenant(s.config(), in.TenantID)
 	if cfg.Latency > 0 {
 		select {
 		case <-time.After(cfg.Latency):
 		case <-r.Context().Done():
 			return
 		}
-	}
-	var in invoiceIn
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&in); err != nil || !in.valid() {
-		reply(w, http.StatusBadRequest, map[string]string{"error": "bad invoice"})
-		return
 	}
 	if cfg.RejectRefPrefix != "" && strings.HasPrefix(in.InvoiceNumber, cfg.RejectRefPrefix) {
 		reply(w, http.StatusUnprocessableEntity, map[string]string{"error": "invoice refused"})

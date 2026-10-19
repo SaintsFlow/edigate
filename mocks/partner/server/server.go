@@ -111,9 +111,10 @@ type Server struct {
 	cfg  Config
 	http *http.Client
 
-	mu    sync.Mutex // guards knobs
-	knobs Knobs
-	wg    sync.WaitGroup // the 997 that are on their way
+	mu       sync.Mutex // guards knobs and byTenant
+	knobs    Knobs
+	byTenant map[string]Knobs // knobs per tenant (AS2-From), over knobs
+	wg       sync.WaitGroup   // the 997 that are on their way
 }
 
 // New builds the server on a pool whose database has the schema (see Migrate).
@@ -124,7 +125,7 @@ func New(pool *pgxpool.Pool, cfg Config) *Server {
 	if cfg.Log == nil {
 		cfg.Log = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
-	return &Server{pool: pool, cfg: cfg, knobs: cfg.Knobs, http: &http.Client{Timeout: 15 * time.Second}}
+	return &Server{pool: pool, cfg: cfg, knobs: cfg.Knobs, byTenant: map[string]Knobs{}, http: &http.Client{Timeout: 15 * time.Second}}
 }
 
 // Close waits for the 997 that are on their way.
@@ -136,6 +137,16 @@ func (s *Server) current() Knobs {
 	return s.knobs
 }
 
+// currentFor is the knobs for the transmissions of one tenant: its own if set, else the process-wide ones.
+func (s *Server) currentFor(tenant string) Knobs {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if k, ok := s.byTenant[tenant]; ok {
+		return k
+	}
+	return s.knobs
+}
+
 // Handler returns the routes of the emulator.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
@@ -144,6 +155,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /email", s.findEmail)
 	mux.HandleFunc("GET /control", s.control)
 	mux.HandleFunc("POST /control", s.control)
+	mux.HandleFunc("DELETE /control/{tenant_id}", s.resetTenant)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		if err := s.pool.Ping(r.Context()); err != nil {
 			reply(w, http.StatusServiceUnavailable, map[string]string{"error": "database unavailable"})
@@ -209,7 +221,7 @@ func (s *Server) receive(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	k := s.current()
+	k := s.currentFor(from)
 	s.wg.Add(1)
 	go s.acknowledge(k, from, to, replyTo, ic)
 
@@ -428,14 +440,18 @@ func (s *Server) token(address, partner string) (string, error) {
 }
 
 // control shows the knobs, or sets the ones that are in the body. Only the stand's own
-// addresses may call it.
+// addresses may call it. With "tenant_id" (the id the gateway sends under, AS2-From) the knobs
+// are those of that tenant only: they start from the process-wide ones and win for its
+// transmissions; without it the process-wide knobs change. GET takes ?tenant_id=.
 func (s *Server) control(w http.ResponseWriter, r *http.Request) {
 	if !fromStand(r.RemoteAddr) {
 		reply(w, http.StatusForbidden, map[string]string{"error": "forbidden"})
 		return
 	}
+	tenant := r.URL.Query().Get("tenant_id")
 	if r.Method == http.MethodPost {
 		var patch struct {
+			TenantID    *string  `json:"tenant_id"`
 			AckDelayMS  *int     `json:"ack_delay_ms"`
 			AckStatus   *string  `json:"ack_status"`
 			MDNDelayMS  *int     `json:"mdn_delay_ms"`
@@ -447,8 +463,20 @@ func (s *Server) control(w http.ResponseWriter, r *http.Request) {
 			reply(w, http.StatusBadRequest, map[string]string{"error": "bad knobs"})
 			return
 		}
+		if patch.TenantID != nil {
+			tenant = *patch.TenantID
+			if tenant == "" || len(tenant) > 128 {
+				reply(w, http.StatusBadRequest, map[string]string{"error": "bad tenant_id"})
+				return
+			}
+		}
 		s.mu.Lock()
 		next := s.knobs
+		if patch.TenantID != nil {
+			if t, found := s.byTenant[tenant]; found {
+				next = t
+			}
+		}
 		if patch.AckDelayMS != nil {
 			next.AckDelayMS = *patch.AckDelayMS
 		}
@@ -462,7 +490,9 @@ func (s *Server) control(w http.ResponseWriter, r *http.Request) {
 			next.MDNDropRate = *patch.MDNDropRate
 		}
 		ok := next.Valid()
-		if ok {
+		if ok && patch.TenantID != nil {
+			s.byTenant[tenant] = next
+		} else if ok {
 			s.knobs = next
 		}
 		s.mu.Unlock()
@@ -471,6 +501,18 @@ func (s *Server) control(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	reply(w, http.StatusOK, s.currentFor(tenant))
+}
+
+// resetTenant is DELETE /control/{tenant_id}: the tenant goes back to the process-wide knobs.
+func (s *Server) resetTenant(w http.ResponseWriter, r *http.Request) {
+	if !fromStand(r.RemoteAddr) {
+		reply(w, http.StatusForbidden, map[string]string{"error": "forbidden"})
+		return
+	}
+	s.mu.Lock()
+	delete(s.byTenant, r.PathValue("tenant_id"))
+	s.mu.Unlock()
 	reply(w, http.StatusOK, s.current())
 }
 
