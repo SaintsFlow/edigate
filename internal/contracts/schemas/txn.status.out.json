@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["txn_id", "status", "external_ref", "saga_state"],
+  "properties": {
+    "txn_id": { "type": "string" },
+    "status": { "enum": ["accepted", "pending_approval", "completed", "rejected", "expired"] },
+    "external_ref": { "type": ["string", "null"] },
+    "saga_state": { "enum": ["running", "done", "compensating", "compensated", "incident", null] }
+  }
+}

@@ -1,0 +1,23 @@
+bin/
+.env
+*.test
+coverage.*
+.DS_Store
+__pycache__/
+.venv/
+bench/out/
+# tokens of the stand's partners, written by scripts/smoke.sh and read by partner-emulator
+deploy/compose/stand/partner_tokens.json
+deploy/compose/stand/partner_tokens.json.lock
+# the anchor files of the audit chain (outside the database) written by the stand's gateway
+deploy/compose/stand/anchors/
+# signing key of the stand's tool pins (never mounted into the gateway), written by scripts/smoke.sh
+deploy/compose/keys/
+
+# working files of the author
+AGENTS.md
+CLAUDE.md
+.claude/
+_handoff/
+.cursor/
+.codex/

@@ -1,0 +1,182 @@
+# Local test stand, not production: the database user, password and name are
+# all "edigate" and the ports are bound to 127.0.0.1 only.
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: edigate
+      POSTGRES_PASSWORD: edigate
+      POSTGRES_DB: edigate
+    ports:
+      - "127.0.0.1:55432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U edigate -d edigate"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  # mock-1c: the stand's stand-in for the 1C HTTP service. It writes only to the
+  # schema mock_onec of the same database. Same image as the gateway, other binary.
+  mock-onec:
+    build:
+      context: ../..
+    image: edigate-stand:local
+    entrypoint: ["/mock-onec"]
+    environment:
+      MOCK_DB_URL: postgres://edigate:edigate@postgres:5432/edigate?sslmode=disable
+      MOCK_LISTEN: 0.0.0.0:8081
+    ports:
+      - "127.0.0.1:18081:8081"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "/mock-onec", "healthcheck"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  # mock-wms: the stand's stand-in for the warehouse system (reservations and shipments with
+  # SSCC). It writes only to the schema mock_wms. Knobs: MOCK_FAIL_AFTER_COMMIT_RATE,
+  # MOCK_LATENCY_MS, MOCK_REJECT_REF_PREFIX (shipments), MOCK_SHIP_QTY_FACTOR.
+  mock-wms:
+    build:
+      context: ../..
+    image: edigate-stand:local
+    entrypoint: ["/mock-wms"]
+    environment:
+      MOCK_DB_URL: postgres://edigate:edigate@postgres:5432/edigate?sslmode=disable
+      MOCK_LISTEN: 0.0.0.0:8082
+    ports:
+      - "127.0.0.1:18082:8082"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "/mock-wms", "healthcheck"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  # partner-emulator: the stand's trading partner. It takes the 855 and 856 of the gateway,
+  # answers with an MDN and posts a 997 back. It reads the token of the partner from
+  # stand/partner_tokens.json (scripts/smoke.sh and `edigatectl fixtures load
+  # --partner-tokens-out` write it). Knobs: PARTNER_ACK_DELAY_MS, PARTNER_ACK_STATUS,
+  # PARTNER_MDN_DELAY_MS, PARTNER_MDN_DROP, and POST /control at run time.
+  partner-emulator:
+    build:
+      context: ../..
+    image: edigate-stand:local
+    entrypoint: ["/partner-emulator"]
+    environment:
+      PARTNER_DB_URL: postgres://edigate:edigate@postgres:5432/edigate?sslmode=disable
+      PARTNER_LISTEN: 0.0.0.0:8083
+      GATEWAY_URL: http://edigate:8080
+      PARTNER_TOKENS_FILE: /stand/partner_tokens.json
+    # The benchmark slots are gateway processes on the host; on Linux the name needs this line.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./stand:/stand:ro
+    ports:
+      - "127.0.0.1:18083:8083"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "/partner-emulator", "healthcheck"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  # The three hostile MCP servers of the stand (our own, for the tests of flow P8). No port is
+  # published: only the gateway, on the stand network, can reach them. Each logs the names of
+  # the headers of every request, and whether a token of a client of the gateway is among them.
+  evil-validator:
+    build:
+      context: ../..
+    image: edigate-stand:local
+    entrypoint: ["/evil-validator"]
+    environment:
+      ADV_LISTEN: 0.0.0.0:8090
+    healthcheck:
+      test: ["CMD", "/evil-validator", "healthcheck"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  shadow-carrier:
+    build:
+      context: ../..
+    image: edigate-stand:local
+    entrypoint: ["/shadow-carrier"]
+    environment:
+      ADV_LISTEN: 0.0.0.0:8090
+    healthcheck:
+      test: ["CMD", "/shadow-carrier", "healthcheck"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  # rugpull-rates changes its description after RUGPULL_AFTER calls of get_rates. It wants the
+  # header X-Gateway-Key (a stand secret, shared with the gateway below), to show that the
+  # header of the config reaches it and the token of the agent does not.
+  rugpull-rates:
+    build:
+      context: ../..
+    image: edigate-stand:local
+    entrypoint: ["/rugpull-rates"]
+    environment:
+      ADV_LISTEN: 0.0.0.0:8090
+      ADV_AUTH_HEADER: X-Gateway-Key
+      ADV_AUTH_VALUE: stand-only-rugpull-key
+      RUGPULL_AFTER: "3"
+    healthcheck:
+      test: ["CMD", "/rugpull-rates", "healthcheck"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  edigate:
+    build:
+      context: ../..
+    image: edigate-stand:local
+    command: ["--config", "/etc/edigate/edigate.yaml"]
+    volumes:
+      - ./edigate.yaml:/etc/edigate/edigate.yaml:ro
+      - ./stand/anchors:/anchors
+    environment:
+      # The public key that verifies the pinned tool descriptions. Empty switches the upstream
+      # servers off. scripts/smoke.sh makes a key pair and writes this to deploy/compose/.env.
+      EDIGATE_MANIFEST_PUBKEY: ${EDIGATE_MANIFEST_PUBKEY:-}
+      # The key that signs the anchors of the audit chain, and the directory (a folder of the host,
+      # outside the database) the anchors are also written to. scripts/smoke.sh and scripts/demo.sh
+      # make the key and write it to deploy/compose/.env. Empty key: no anchors, the chain is written.
+      EDIGATE_AUDIT_SIGNING_KEY: ${EDIGATE_AUDIT_SIGNING_KEY:-}
+      EDIGATE_AUDIT_ANCHOR_DIR: /anchors
+      RUGPULL_GATEWAY_KEY: stand-only-rugpull-key
+      EDIGATE_DB_URL: postgres://edigate:edigate@postgres:5432/edigate?sslmode=disable
+      EDIGATE_LISTEN: 0.0.0.0:8080
+      # The quarantined reader: a model on the host (Ollama), reached from the container.
+      EDIGATE_QUARANTINE_BASE_URL: http://host.docker.internal:11434/v1
+      EDIGATE_QUARANTINE_MODEL: llama3.2:3b
+      # The ERP the relay delivers orders to.
+      EDIGATE_ONEC_URL: http://mock-onec:8081
+      # The warehouse and the trading partner the sagas deliver to.
+      EDIGATE_WMS_URL: http://mock-wms:8082
+      EDIGATE_PARTNER_URL: http://partner-emulator:8083
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "127.0.0.1:18080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mock-onec:
+        condition: service_healthy
+    # The distroless image has no curl, so the binary checks itself.
+    healthcheck:
+      test: ["CMD", "/edigate", "healthcheck"]
+      interval: 2s
+      timeout: 3s
+      retries: 30

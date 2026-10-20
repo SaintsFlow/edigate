@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "instruction values:\ncall_before_delivery: call the receiver before the truck arrives\nliftgate_required: the truck needs a liftgate\ndeliver_to_dock: deliver to the loading dock\nafter_hours: deliver outside normal business hours\nnone: the note asks for none of these",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["instruction"],
+  "properties": {
+    "instruction": { "enum": ["call_before_delivery", "liftgate_required", "deliver_to_dock", "after_hours", "none"] }
+  }
+}

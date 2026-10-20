@@ -1,0 +1,19 @@
+{
+  "tenant": {"id": "chaos", "interchange_id": "ZZ:ZZCHAOSGW", "currency": "USD"},
+  "partners": [
+    {
+      "partner_id": "ZZ:ZZCHAOSBUY",
+      "role": "customer",
+      "name": "Chaos buyer",
+      "auto_max_amount": "100000.00",
+      "daily_auto_max": "1000000.00",
+      "contacts": [],
+      "ship_to_codes": ["DC01"]
+    }
+  ],
+  "price_list": [
+    {"sku": "CH-1", "unit": "EA", "unit_price": "3.25"},
+    {"sku": "CH-2", "unit": "EA", "unit_price": "4.50"}
+  ],
+  "email_templates": []
+}

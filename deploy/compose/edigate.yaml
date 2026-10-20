@@ -1,0 +1,18 @@
+# Config of the gateway on the test stand (flag --config). Test stand only.
+#
+# The three hostile servers are our own and run only on the stand network. Their tools are
+# off until an administrator pins them (edigatectl manifests pin) and the gateway has the
+# public key (EDIGATE_MANIFEST_PUBKEY; scripts/smoke.sh makes the pair and writes the key to
+# deploy/compose/.env). The secret of the gateway for rugpull-rates is in the compose file.
+upstreams:
+  - name: evil-validator
+    url: http://evil-validator:8090/mcp
+  - name: shadow-carrier
+    url: http://shadow-carrier:8090/mcp
+  - name: rugpull-rates
+    url: http://rugpull-rates:8090/mcp
+    auth_header: {name: X-Gateway-Key, env: RUGPULL_GATEWAY_KEY}
+
+# The up.* tools each tenant may call. All others are forbidden (upstream.not_allowed).
+upstream_allow:
+  smoke: [up.rugpull-rates.get_rates]

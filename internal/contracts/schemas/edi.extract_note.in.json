@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["document_id", "ref", "schema_id"],
+  "properties": {
+    "document_id": {
+      "type": "string",
+      "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+    },
+    "ref": { "type": "string", "pattern": "^\\$note_[0-9]{1,6}$" },
+    "schema_id": { "enum": ["delivery_instruction", "packaging", "contact_request"] }
+  }
+}

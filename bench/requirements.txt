@@ -1,0 +1,7 @@
+# Harness of the benchmark (bench/harness, bench/metrics). The corpus generator needs the standard library only.
+# Exact versions, checked with `pip index versions` on 19 October 2026. Another package goes in only by a decision
+# recorded in the wave file.
+mcp==2.3.0
+openai==3.35.1
+psycopg[binary]==3.3.6
+httpx==0.28.1

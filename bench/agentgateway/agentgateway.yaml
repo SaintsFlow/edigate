@@ -1,0 +1,27 @@
+# C2 of the protocol (section 2): the process of the gateway in mode `plain` behind agentgateway v1.6.0
+# (image ghcr.io/agentgateway/agentgateway:v1.6.0, Apache-2.0). The harness fills the two placeholders and mounts the
+# file into one container per slot (bench/harness/stand.py, Slot.start_proxy).
+#
+#   __GATEWAY_PORT__  the port of the slot's gateway process on the host (reached as host.docker.internal)
+#   __TOOL_RULE__     the authorization rule: exactly the tools the agent gets in C3, no more
+#
+# urlRewrite sets the Host header to localhost: the MCP handler of the Go SDK refuses a request that comes over the
+# loopback of the host (Docker Desktop forwards host.docker.internal there) with another Host name.
+# agentgateway checks no argument and no meaning; it only filters the tool list and the calls by name.
+binds:
+- port: 3000
+  listeners:
+  - routes:
+    - policies:
+        urlRewrite:
+          authority:
+            full: localhost:__GATEWAY_PORT__
+        mcpAuthorization:
+          rules:
+          - '__TOOL_RULE__'
+      backends:
+      - mcp:
+          targets:
+          - name: gw
+            mcp:
+              host: http://host.docker.internal:__GATEWAY_PORT__/mcp
